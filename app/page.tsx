@@ -5,9 +5,16 @@ import { useEffect, useState } from "react";
 export default function Home() {
   const [places, setPlaces] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [userLocation, setUserLocation] = useState<any>(null);
+  const [budget, setBudget] = useState("medium");
 
-  // 🧠 Fetch cafes from OpenStreetMap (Overpass API)
+  // 👥 Simulated group
+  const groupPreferences = [
+    { name: "You", budget: "medium" },
+    { name: "Friend1", budget: "low" },
+    { name: "Friend2", budget: "medium" },
+  ];
+
+  // 🧠 Fetch OSM data
   async function fetchCafes(lat: number, lon: number) {
     const query = `
       [out:json];
@@ -24,25 +31,61 @@ export default function Home() {
     return data.elements;
   }
 
-  // 📏 Distance calculation (Haversine)
-  function getDistance(
-    lat1: number,
-    lon1: number,
-    lat2: number,
-    lon2: number
-  ) {
+  // 📏 Distance
+  function getDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
     const R = 6371;
     const dLat = ((lat2 - lat1) * Math.PI) / 180;
     const dLon = ((lon2 - lon1) * Math.PI) / 180;
 
     const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.sin(dLat / 2) ** 2 +
       Math.cos((lat1 * Math.PI) / 180) *
         Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
+        Math.sin(dLon / 2) ** 2;
 
     return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+  }
+
+  // 💸 Smarter cost estimation
+  function estimateCost(place: any) {
+    const type = place.tags?.amenity;
+    const name = place.tags?.name?.toLowerCase() || "";
+
+    let base = 800;
+
+    if (type === "fast_food") base = 300;
+    else if (type === "cafe") base = 700;
+    else if (type === "restaurant") base = 1000;
+
+    // 🧠 Name-based intelligence
+    if (name.includes("dhaba") || name.includes("mess")) base -= 200;
+    if (name.includes("bar") || name.includes("lounge")) base += 300;
+    if (name.includes("hotel") || name.includes("fine")) base += 400;
+
+    // 🎲 Real-world variation
+    const variation = Math.floor(Math.random() * 300) - 150;
+
+    return Math.max(200, base + variation);
+  }
+
+  // 💸 Price category
+  function getPriceCategory(cost: number) {
+    if (cost < 700) return "low";
+    if (cost <= 900) return "medium";
+    return "high";
+  }
+
+  // 👥 Majority-based group logic
+  function matchesGroup(place: any) {
+    let score = 0;
+
+    groupPreferences.forEach((user) => {
+      if (user.budget === "low" && place.price === "low") score++;
+      else if (user.budget === "medium" && place.price !== "high") score++;
+      else if (user.budget === "high") score++;
+    });
+
+    return score >= Math.ceil(groupPreferences.length / 2);
   }
 
   useEffect(() => {
@@ -54,11 +97,9 @@ export default function Home() {
     navigator.geolocation.getCurrentPosition(async (position) => {
       const { latitude, longitude } = position.coords;
 
-      setUserLocation({ latitude, longitude });
-
       const rawPlaces = await fetchCafes(latitude, longitude);
 
-      // 🧹 STEP 1: Filter valid places
+      // 🧹 Filter valid
       const filtered = rawPlaces.filter(
         (place: any) =>
           place.tags &&
@@ -66,43 +107,76 @@ export default function Home() {
           place.tags.name.length > 2
       );
 
-      // 🧹 STEP 2: Remove duplicates (by name)
+      // 🧹 Remove duplicates
       const unique = Array.from(
-        new Map(
-          filtered.map((place: any) => [place.tags.name, place])
-        ).values()
+        new Map(filtered.map((p: any) => [p.tags.name, p])).values()
       );
 
-      // 🧠 STEP 3: Enrich with distance
-      const enriched = unique.map((place: any) => ({
-        ...place,
-        distance: getDistance(
+      // 🧠 Enrich
+      const enriched = unique.map((place: any) => {
+        const distance = getDistance(
           latitude,
           longitude,
           place.lat,
           place.lon
-        ),
-      }));
+        );
 
-      // 🧠 STEP 4: Sort by nearest
+        const cost = estimateCost(place);
+        const price = getPriceCategory(cost);
+
+        return {
+          ...place,
+          distance,
+          estimatedCostForTwo: cost,
+          price,
+        };
+      });
+
+      // 📏 Sort + limit results
       enriched.sort((a: any, b: any) => a.distance - b.distance);
 
-      setPlaces(enriched);
+      const topPlaces = enriched.slice(0, 20);
+
+      setPlaces(topPlaces);
       setLoading(false);
     });
   }, []);
+
+  // 💸 Combined filter
+  const filteredPlaces = places.filter((place: any) => {
+    const individualMatch =
+      budget === "low"
+        ? place.price === "low"
+        : budget === "medium"
+        ? place.price !== "high"
+        : true;
+
+    const groupMatch = matchesGroup(place);
+
+    return individualMatch && groupMatch;
+  });
 
   return (
     <main className="min-h-screen bg-black text-white p-6">
       <h1 className="text-3xl font-bold mb-6">🍽️ Cafe Finder</h1>
 
+      <select
+        value={budget}
+        onChange={(e) => setBudget(e.target.value)}
+        className="bg-gray-800 p-2 rounded mb-4"
+      >
+        <option value="low">₹ (&lt;700)</option>
+        <option value="medium">₹₹ (700–900)</option>
+        <option value="high">₹₹₹ (900+)</option>
+      </select>
+
       <div className="grid gap-4">
         {loading ? (
           <p>🔍 Scanning nearby food spots...</p>
-        ) : places.length === 0 ? (
-          <p>No places found 😢</p>
+        ) : filteredPlaces.length === 0 ? (
+          <p>No places match your group's vibe 😢</p>
         ) : (
-          places.map((place, index) => (
+          filteredPlaces.map((place, index) => (
             <div key={index} className="bg-gray-900 p-4 rounded-xl">
               <h2 className="text-xl font-semibold">
                 {place.tags.name}
@@ -114,6 +188,14 @@ export default function Home() {
 
               <p className="text-gray-400 text-sm">
                 📏 {place.distance.toFixed(2)} km away
+              </p>
+
+              <p className="text-blue-400 text-sm">
+                💰 ₹{place.estimatedCostForTwo} for two
+              </p>
+
+              <p className="text-green-400 text-sm">
+                💸 {place.price.toUpperCase()}
               </p>
             </div>
           ))
