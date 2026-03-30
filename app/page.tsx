@@ -1,20 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import MapView from "@/components/MapView";
 
 export default function Home() {
   const [places, setPlaces] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [budget, setBudget] = useState("medium");
+  const [userLocation, setUserLocation] = useState<any>(null);
 
-  // 👥 Simulated group
   const groupPreferences = [
     { name: "You", budget: "medium" },
     { name: "Friend1", budget: "low" },
     { name: "Friend2", budget: "medium" },
   ];
 
-  // 🧠 Fetch OSM data
   async function fetchCafes(lat: number, lon: number) {
     const query = `
       [out:json];
@@ -31,7 +31,6 @@ export default function Home() {
     return data.elements;
   }
 
-  // 📏 Distance
   function getDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
     const R = 6371;
     const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -46,7 +45,6 @@ export default function Home() {
     return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
   }
 
-  // 💸 Smarter cost estimation
   function estimateCost(place: any) {
     const type = place.tags?.amenity;
     const name = place.tags?.name?.toLowerCase() || "";
@@ -57,25 +55,21 @@ export default function Home() {
     else if (type === "cafe") base = 700;
     else if (type === "restaurant") base = 1000;
 
-    // 🧠 Name-based intelligence
     if (name.includes("dhaba") || name.includes("mess")) base -= 200;
     if (name.includes("bar") || name.includes("lounge")) base += 300;
     if (name.includes("hotel") || name.includes("fine")) base += 400;
 
-    // 🎲 Real-world variation
     const variation = Math.floor(Math.random() * 300) - 150;
 
     return Math.max(200, base + variation);
   }
 
-  // 💸 Price category
   function getPriceCategory(cost: number) {
     if (cost < 700) return "low";
     if (cost <= 900) return "medium";
     return "high";
   }
 
-  // 👥 Majority-based group logic
   function matchesGroup(place: any) {
     let score = 0;
 
@@ -97,9 +91,11 @@ export default function Home() {
     navigator.geolocation.getCurrentPosition(async (position) => {
       const { latitude, longitude } = position.coords;
 
+      setUserLocation({ latitude, longitude });
+
       const rawPlaces = await fetchCafes(latitude, longitude);
 
-      // 🧹 Filter valid
+      // 🧹 Filter
       const filtered = rawPlaces.filter(
         (place: any) =>
           place.tags &&
@@ -107,7 +103,7 @@ export default function Home() {
           place.tags.name.length > 2
       );
 
-      // 🧹 Remove duplicates
+      // 🧹 Remove duplicates (FIXED)
       const unique = Array.from(
         new Map(filtered.map((p: any) => [p.tags.name, p])).values()
       );
@@ -132,17 +128,13 @@ export default function Home() {
         };
       });
 
-      // 📏 Sort + limit results
       enriched.sort((a: any, b: any) => a.distance - b.distance);
 
-      const topPlaces = enriched.slice(0, 20);
-
-      setPlaces(topPlaces);
+      setPlaces(enriched.slice(0, 20));
       setLoading(false);
     });
   }, []);
 
-  // 💸 Combined filter
   const filteredPlaces = places.filter((place: any) => {
     const individualMatch =
       budget === "low"
@@ -151,9 +143,7 @@ export default function Home() {
         ? place.price !== "high"
         : true;
 
-    const groupMatch = matchesGroup(place);
-
-    return individualMatch && groupMatch;
+    return individualMatch && matchesGroup(place);
   });
 
   return (
@@ -169,6 +159,11 @@ export default function Home() {
         <option value="medium">₹₹ (700–900)</option>
         <option value="high">₹₹₹ (900+)</option>
       </select>
+
+      {/* 🗺️ MAP FIXED */}
+      {userLocation && (
+        <MapView places={filteredPlaces} userLocation={userLocation} />
+      )}
 
       <div className="grid gap-4">
         {loading ? (
