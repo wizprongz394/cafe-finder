@@ -6,18 +6,20 @@ import MapView from "@/components/MapView";
 export default function Home() {
   const [places, setPlaces] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [budget, setBudget] = useState("medium");
+  const [searching, setSearching] = useState(false);
 
   const [userLocation, setUserLocation] = useState<any>(null);
   const [searchLocation, setSearchLocation] = useState<any>(null);
 
   const [locationQuery, setLocationQuery] = useState("");
   const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [activeIndex, setActiveIndex] = useState(-1);
 
   const [radius, setRadius] = useState(2000);
-
   const [selectedPlace, setSelectedPlace] = useState<any>(null);
-  const [shortlisted, setShortlisted] = useState<any[]>([]);
+
+  // ⭐ NEW: shortlist
+  const [shortlist, setShortlist] = useState<any[]>([]);
 
   // 🌍 Fetch places
   async function fetchCafes(lat: number, lon: number) {
@@ -54,35 +56,48 @@ export default function Home() {
   // 💸 Cost estimation
   function estimateCost(place: any) {
     const type = place.tags?.amenity;
-    const name = place.tags?.name?.toLowerCase() || "";
 
-    let base = 800;
+    if (type === "fast_food") return 300;
+    if (type === "cafe") return 700;
+    if (type === "restaurant") return 1000;
 
-    if (type === "fast_food") base = 300;
-    else if (type === "cafe") base = 700;
-    else if (type === "restaurant") base = 1000;
-
-    if (name.includes("dhaba") || name.includes("mess")) base -= 200;
-    if (name.includes("bar") || name.includes("lounge")) base += 300;
-    if (name.includes("hotel") || name.includes("fine")) base += 400;
-
-    const variation = Math.floor(Math.random() * 300) - 150;
-
-    return Math.max(200, base + variation);
+    return 800;
   }
 
-  function getPriceCategory(cost: number) {
-    if (cost < 700) return "low";
-    if (cost <= 900) return "medium";
-    return "high";
+  function getPriceColor(cost: number) {
+    if (cost < 700) return "text-green-400";
+    if (cost <= 900) return "text-yellow-400";
+    return "text-red-400";
   }
 
   function getScore(place: any) {
     let score = 0;
     score += Math.max(0, 5 - place.distance);
-    if (place.price === "medium") score += 3;
     if (place.tags.amenity === "cafe") score += 2;
     return score;
+  }
+
+  // ⭐ TOGGLE SHORTLIST
+  function toggleShortlist(place: any) {
+    setShortlist((prev) => {
+      const exists = prev.find(
+        (p) => p.tags.name === place.tags.name
+      );
+
+      if (exists) {
+        return prev.filter(
+          (p) => p.tags.name !== place.tags.name
+        );
+      }
+
+      return [...prev, place];
+    });
+  }
+
+  function isShortlisted(place: any) {
+    return shortlist.some(
+      (p) => p.tags.name === place.tags.name
+    );
   }
 
   // 🔍 AUTOCOMPLETE
@@ -97,7 +112,6 @@ export default function Home() {
     setSuggestions(data.features || []);
   }
 
-  // 🔍 SELECT SUGGESTION
   function selectSuggestion(s: any) {
     const [lon, lat] = s.center;
 
@@ -105,29 +119,41 @@ export default function Home() {
     setSearchLocation({ latitude: lat, longitude: lon });
     setLocationQuery(s.place_name);
     setSuggestions([]);
+    setActiveIndex(-1);
   }
 
-  // 📍 LAT LNG INPUT
-  function handleLatLngInput() {
-    try {
-      const [lat, lon] = locationQuery.split(",").map(Number);
+  async function handleSearch() {
+    if (!locationQuery) return;
 
-      if (!lat || !lon) return;
+    setSearching(true);
+
+    const isLatLng = /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(locationQuery);
+
+    if (isLatLng) {
+      const [lat, lon] = locationQuery.split(",").map(Number);
 
       setUserLocation({ latitude: lat, longitude: lon });
       setSearchLocation({ latitude: lat, longitude: lon });
-    } catch {
-      console.log("Invalid coords");
+      setSuggestions([]);
+      setActiveIndex(-1);
+      setSearching(false);
+      return;
     }
+
+    if (suggestions.length > 0) {
+      selectSuggestion(suggestions[0]);
+    }
+
+    setSearching(false);
   }
 
-  // 🧭 CURRENT LOCATION
   function useCurrentLocation() {
     navigator.geolocation.getCurrentPosition((pos) => {
       const { latitude, longitude } = pos.coords;
 
       setUserLocation({ latitude, longitude });
       setSearchLocation({ latitude, longitude });
+      setSuggestions([]);
     });
   }
 
@@ -147,15 +173,12 @@ export default function Home() {
       );
 
       const enriched = unique.map((place: any) => {
-        const distance = getDistance(lat, lon, place.lat, place.lon);
         const cost = estimateCost(place);
-        const price = getPriceCategory(cost);
 
         return {
           ...place,
-          distance,
+          distance: getDistance(lat, lon, place.lat, place.lon),
           estimatedCostForTwo: cost,
-          price,
         };
       });
 
@@ -176,55 +199,85 @@ export default function Home() {
     }
   }, [searchLocation, radius]);
 
-  const filteredPlaces = places;
+  const isLatLng = /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(locationQuery);
 
   return (
     <main className="min-h-screen bg-black text-white p-6">
       <h1 className="text-3xl font-bold mb-6">🍽️ Cafe Finder</h1>
 
-      {/* 🔍 SEARCH INPUT */}
-      <input
-        type="text"
-        placeholder="Search location or lat,lng"
-        value={locationQuery}
-        onChange={(e) => {
-          setLocationQuery(e.target.value);
-          fetchSuggestions(e.target.value);
-        }}
-        className="bg-gray-800 p-2 rounded w-full mb-2"
-      />
+      {/* 🔍 SEARCH */}
+      <div className="flex gap-2 mb-2">
+        <input
+          type="text"
+          placeholder="Search place OR lat,lng (22.57,88.36)"
+          value={locationQuery}
+          onChange={(e) => {
+            const value = e.target.value;
+            setLocationQuery(value);
+
+            if (!/^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(value)) {
+              fetchSuggestions(value);
+            } else {
+              setSuggestions([]);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              if (activeIndex >= 0) {
+                selectSuggestion(suggestions[activeIndex]);
+              } else {
+                handleSearch();
+              }
+            }
+
+            if (e.key === "ArrowDown") {
+              setActiveIndex((prev) =>
+                prev < suggestions.length - 1 ? prev + 1 : prev
+              );
+            }
+
+            if (e.key === "ArrowUp") {
+              setActiveIndex((prev) => (prev > 0 ? prev - 1 : 0));
+            }
+          }}
+          className="bg-gray-800 p-2 rounded w-full"
+        />
+
+        <button
+          onClick={handleSearch}
+          className="bg-blue-600 px-4 rounded flex items-center justify-center"
+        >
+          {searching ? (
+            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+          ) : (
+            "🔍"
+          )}
+        </button>
+
+        <button
+          onClick={useCurrentLocation}
+          className="bg-green-600 px-4 rounded"
+        >
+          🧭
+        </button>
+      </div>
 
       {/* 🔽 AUTOCOMPLETE */}
-      {suggestions.length > 0 && (
+      {!isLatLng && suggestions.length > 0 && (
         <div className="bg-gray-900 rounded mb-4">
           {suggestions.map((s, i) => (
             <div
               key={i}
               onClick={() => selectSuggestion(s)}
-              className="p-2 hover:bg-gray-700 cursor-pointer"
+              className={`p-2 cursor-pointer ${
+                i === activeIndex ? "bg-gray-700" : "hover:bg-gray-700"
+              }`}
             >
               {s.place_name}
             </div>
           ))}
         </div>
       )}
-
-      {/* 🎛️ CONTROLS */}
-      <div className="flex gap-2 mb-4 flex-wrap">
-        <button
-          onClick={handleLatLngInput}
-          className="bg-purple-600 px-4 py-2 rounded"
-        >
-          📍 Lat/Lng
-        </button>
-
-        <button
-          onClick={useCurrentLocation}
-          className="bg-green-600 px-4 py-2 rounded"
-        >
-          🧭 My Location
-        </button>
-      </div>
 
       {/* 📏 RADIUS */}
       <select
@@ -240,42 +293,57 @@ export default function Home() {
       {/* 🗺️ MAP */}
       {userLocation && (
         <MapView
-          places={filteredPlaces}
+          places={places}
           userLocation={userLocation}
           selectedPlace={selectedPlace}
           onSelectPlace={setSelectedPlace}
         />
       )}
 
+      {/* ⭐ SHORTLIST DEBUG (LOGIC VIEW) */}
+      <div className="mb-4 text-sm text-gray-400">
+        Shortlisted: {shortlist.length}
+      </div>
+
       {/* 📋 LIST */}
       <div className="grid gap-4">
         {loading ? (
           <p>Loading...</p>
         ) : (
-          filteredPlaces.map((place, i) => (
-            <div
-              key={i}
-              onClick={() => setSelectedPlace(place)}
-              className="bg-gray-900 p-4 rounded cursor-pointer"
-            >
-              <h2>{place.tags.name}</h2>
-              <p>📏 {place.distance.toFixed(2)} km</p>
-              <p>💰 ₹{place.estimatedCostForTwo}</p>
+          places.map((place, i) => {
+            const cost = place.estimatedCostForTwo;
+            const added = isShortlisted(place);
 
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShortlisted((prev) => {
-                    if (prev.find(p => p.tags.name === place.tags.name)) return prev;
-                    return [...prev, place];
-                  });
-                }}
-                className="mt-2 bg-yellow-600 px-3 py-1 rounded"
+            return (
+              <div
+                key={i}
+                onClick={() => setSelectedPlace(place)}
+                className="bg-gray-900 p-4 rounded cursor-pointer"
               >
-                ⭐ Add
-              </button>
-            </div>
-          ))
+                <h2 className="text-lg font-semibold">
+                  {place.tags.name}
+                </h2>
+
+                <p className="text-gray-400 text-sm">
+                  📏 {place.distance.toFixed(2)} km away
+                </p>
+
+                <p className={`${getPriceColor(cost)} text-sm`}>
+                  💰 ₹{cost} for two
+                </p>
+
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleShortlist(place);
+                  }}
+                  className="mt-2 text-sm"
+                >
+                  {added ? "⭐ Added" : "☆ Add"}
+                </button>
+              </div>
+            );
+          })
         )}
       </div>
     </main>
