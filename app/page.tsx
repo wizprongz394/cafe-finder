@@ -1,349 +1,615 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import MapView from "@/components/MapView";
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface LatLon {
+  latitude: number;
+  longitude: number;
+}
+
+interface PlaceTag {
+  name: string;
+  amenity: string;
+  [key: string]: string | undefined;
+}
+
+interface RawPlace {
+  lat: number;
+  lon: number;
+  tags: PlaceTag;
+}
+
+interface EnrichedPlace extends RawPlace {
+  distance: number;
+  estimatedCostForTwo: number;
+  score: number;
+}
+
+interface MapboxFeature {
+  center: [number, number];
+  place_name: string;
+  text: string;
+}
+
+// ─── Helpers (defined outside component — stable references) ─────────────────
+
+function haversineKm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function estimateCost(place: RawPlace): number {
+  const type = place.tags?.amenity;
+  if (type === "fast_food") return 300;
+  if (type === "cafe") return 700;
+  if (type === "restaurant") return 1000;
+  return 800;
+}
+
+function computeScore(place: EnrichedPlace): number {
+  let score = Math.max(0, 5 - place.distance);
+  if (place.tags?.amenity === "cafe") score += 2;
+  return score;
+}
+
+function getPriceColor(cost: number): string {
+  if (cost < 700) return "text-emerald-400";
+  if (cost <= 900) return "text-amber-400";
+  return "text-rose-400";
+}
+
+function getPriceLabel(cost: number): string {
+  if (cost < 700) return "₹";
+  if (cost <= 900) return "₹₹";
+  return "₹₹₹";
+}
+
+const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export default function Home() {
-  const [places, setPlaces] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searching, setSearching] = useState(false);
+  // location
+  const [userLocation, setUserLocation] = useState<LatLon | null>(null);
+  const [searchLocation, setSearchLocation] = useState<LatLon | null>(null);
 
-  const [userLocation, setUserLocation] = useState<any>(null);
-  const [searchLocation, setSearchLocation] = useState<any>(null);
-
+  // search input
   const [locationQuery, setLocationQuery] = useState("");
-  const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [suggestions, setSuggestions] = useState<MapboxFeature[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [searching, setSearching] = useState(false);
+  const suggestionsRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const suggestDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // filters
   const [radius, setRadius] = useState(2000);
-  const [selectedPlace, setSelectedPlace] = useState<any>(null);
+  const [sortBy, setSortBy] = useState<"score" | "distance" | "price">("score");
 
-  // ⭐ NEW: shortlist
-  const [shortlist, setShortlist] = useState<any[]>([]);
+  // results
+  const [places, setPlaces] = useState<EnrichedPlace[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // 🌍 Fetch places
-  async function fetchCafes(lat: number, lon: number) {
-    const query = `
-      [out:json];
-      node["amenity"~"cafe|restaurant|fast_food"](around:${radius},${lat},${lon});
-      out;
-    `;
+  // UI
+  const [selectedPlace, setSelectedPlace] = useState<EnrichedPlace | null>(null);
+  const [shortlist, setShortlist] = useState<EnrichedPlace[]>([]);
+  const [activeTab, setActiveTab] = useState<"all" | "shortlist">("all");
 
-    const res = await fetch("https://overpass-api.de/api/interpreter", {
-      method: "POST",
-      body: query,
-    });
+  // ── Data fetching ────────────────────────────────────────────────────────────
 
-    const data = await res.json();
-    return data.elements;
-  }
+  const fetchOsmPlaces = useCallback(
+    async (lat: number, lon: number): Promise<RawPlace[]> => {
+      const query = `
+        [out:json][timeout:25];
+        node["amenity"~"cafe|restaurant|fast_food"](around:${radius},${lat},${lon});
+        out body;
+      `;
 
-  // 📏 Distance
-  function getDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
-    const R = 6371;
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+      // Try primary mirror, then fallback mirror — never throw, just return []
+      const endpoints = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+      ];
 
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos((lat1 * Math.PI) / 180) *
-        Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLon / 2) ** 2;
-
-    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-  }
-
-  // 💸 Cost estimation
-  function estimateCost(place: any) {
-    const type = place.tags?.amenity;
-
-    if (type === "fast_food") return 300;
-    if (type === "cafe") return 700;
-    if (type === "restaurant") return 1000;
-
-    return 800;
-  }
-
-  function getPriceColor(cost: number) {
-    if (cost < 700) return "text-green-400";
-    if (cost <= 900) return "text-yellow-400";
-    return "text-red-400";
-  }
-
-  function getScore(place: any) {
-    let score = 0;
-    score += Math.max(0, 5 - place.distance);
-    if (place.tags.amenity === "cafe") score += 2;
-    return score;
-  }
-
-  // ⭐ TOGGLE SHORTLIST
-  function toggleShortlist(place: any) {
-    setShortlist((prev) => {
-      const exists = prev.find(
-        (p) => p.tags.name === place.tags.name
-      );
-
-      if (exists) {
-        return prev.filter(
-          (p) => p.tags.name !== place.tags.name
-        );
+      for (const url of endpoints) {
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            body: query,
+            signal: AbortSignal.timeout(10_000), // 10 s hard timeout
+          });
+          if (!res.ok) continue; // try next mirror
+          const data = await res.json();
+          return (data.elements ?? []) as RawPlace[];
+        } catch {
+          // network error or timeout — try next mirror
+        }
       }
 
-      return [...prev, place];
-    });
-  }
+      // All mirrors failed — return empty so Mapbox results still show
+      console.warn("OSM: all endpoints failed, continuing with Mapbox only");
+      return [];
+    },
+    [radius]
+  );
 
-  function isShortlisted(place: any) {
-    return shortlist.some(
-      (p) => p.tags.name === place.tags.name
+  const fetchMapboxPlaces = useCallback(
+    async (lat: number, lon: number): Promise<RawPlace[]> => {
+      if (!MAPBOX_TOKEN) return [];
+      const res = await fetch(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/cafe,restaurant,food.json` +
+          `?proximity=${lon},${lat}` +
+          `&access_token=${MAPBOX_TOKEN}` +
+          `&limit=25`
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.features ?? []).map((f: MapboxFeature) => ({
+        lat: f.center[1],
+        lon: f.center[0],
+        tags: { name: f.text, amenity: "restaurant" },
+      }));
+    },
+    []
+  );
+
+  const loadPlaces = useCallback(
+    async (lat: number, lon: number) => {
+      setLoading(true);
+      setFetchError(null);
+      try {
+        const [osm, mapbox] = await Promise.all([
+          fetchOsmPlaces(lat, lon),
+          fetchMapboxPlaces(lat, lon),
+        ]);
+
+        if (osm.length === 0 && mapbox.length > 0) {
+          setFetchError("⚠️ OpenStreetMap unavailable — showing Mapbox results only.");
+        }
+
+        const raw = [...osm, ...mapbox].filter((p) => p.tags?.amenity);
+
+        // deduplicate by name+coords
+        const seen = new Map<string, RawPlace>();
+        for (const p of raw) {
+          const key = `${p.tags.name ?? "?"}-${p.lat.toFixed(5)}-${p.lon.toFixed(5)}`;
+          if (!seen.has(key)) seen.set(key, p);
+        }
+
+        let enriched: EnrichedPlace[] = Array.from(seen.values()).map((p) => {
+          const distance = haversineKm(lat, lon, p.lat, p.lon);
+          const estimatedCostForTwo = estimateCost(p);
+          const partial = {
+            ...p,
+            distance,
+            estimatedCostForTwo,
+            score: 0,
+            tags: { ...p.tags, name: p.tags?.name || "Unnamed Place" },
+          };
+          return { ...partial, score: computeScore(partial) };
+        });
+
+        // sort
+        if (sortBy === "distance") {
+          enriched.sort((a, b) => a.distance - b.distance);
+        } else if (sortBy === "price") {
+          enriched.sort((a, b) => a.estimatedCostForTwo - b.estimatedCostForTwo);
+        } else {
+          enriched.sort((a, b) => b.score - a.score);
+        }
+
+        setPlaces(enriched.slice(0, 50));
+      } catch (err) {
+        console.error(err);
+        setFetchError("Failed to load places. Please try again.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [fetchOsmPlaces, fetchMapboxPlaces, sortBy]
+  );
+
+  // ── Effect: load on location / filter change ─────────────────────────────────
+
+  useEffect(() => {
+    if (searchLocation) {
+      loadPlaces(searchLocation.latitude, searchLocation.longitude);
+      return;
+    }
+    // auto-detect on first mount
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const loc = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        setUserLocation(loc);
+        setSearchLocation(loc);
+      },
+      () => setFetchError("Location access denied. Search for a place above.")
     );
+  }, [searchLocation, loadPlaces]);
+
+  // ── Close suggestions on outside click ───────────────────────────────────────
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        suggestionsRef.current &&
+        !suggestionsRef.current.contains(e.target as Node) &&
+        !inputRef.current?.contains(e.target as Node)
+      ) {
+        setSuggestions([]);
+        setActiveIndex(-1);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // ── Suggestions ───────────────────────────────────────────────────────────────
+
+  function fetchSuggestions(query: string) {
+    if (suggestDebounce.current) clearTimeout(suggestDebounce.current);
+    if (!query.trim()) {
+      setSuggestions([]);
+      return;
+    }
+    suggestDebounce.current = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json` +
+            `?access_token=${MAPBOX_TOKEN}&autocomplete=true&limit=5`
+        );
+        const data = await res.json();
+        setSuggestions(data.features ?? []);
+        setActiveIndex(-1);
+      } catch {
+        setSuggestions([]);
+      }
+    }, 300);
   }
 
-  // 🔍 AUTOCOMPLETE
-  async function fetchSuggestions(query: string) {
-    if (!query) return setSuggestions([]);
-
-    const res = await fetch(
-      `https://api.mapbox.com/geocoding/v5/mapbox.places/${query}.json?access_token=${process.env.NEXT_PUBLIC_MAPBOX_TOKEN}&autocomplete=true&limit=5`
-    );
-
-    const data = await res.json();
-    setSuggestions(data.features || []);
-  }
-
-  function selectSuggestion(s: any) {
+  function selectSuggestion(s: MapboxFeature) {
     const [lon, lat] = s.center;
-
-    setUserLocation({ latitude: lat, longitude: lon });
-    setSearchLocation({ latitude: lat, longitude: lon });
+    const loc = { latitude: lat, longitude: lon };
+    setUserLocation(loc);
+    setSearchLocation(loc);
     setLocationQuery(s.place_name);
     setSuggestions([]);
     setActiveIndex(-1);
   }
 
+  // ── Search ────────────────────────────────────────────────────────────────────
+
   async function handleSearch() {
-    if (!locationQuery) return;
-
+    const trimmed = locationQuery.trim();
+    if (!trimmed) return;
     setSearching(true);
+    setSuggestions([]);
 
-    const isLatLng = /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(locationQuery);
-
-    if (isLatLng) {
-      const [lat, lon] = locationQuery.split(",").map(Number);
-
-      setUserLocation({ latitude: lat, longitude: lon });
-      setSearchLocation({ latitude: lat, longitude: lon });
-      setSuggestions([]);
-      setActiveIndex(-1);
+    // lat,lon shortcut
+    if (/^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(trimmed)) {
+      const [lat, lon] = trimmed.split(",").map(Number);
+      const loc = { latitude: lat, longitude: lon };
+      setUserLocation(loc);
+      setSearchLocation(loc);
       setSearching(false);
       return;
     }
 
-    if (suggestions.length > 0) {
-      selectSuggestion(suggestions[0]);
+    // use active suggestion if selected
+    if (activeIndex >= 0 && suggestions[activeIndex]) {
+      selectSuggestion(suggestions[activeIndex]);
+      setSearching(false);
+      return;
     }
 
+    // geocode the query
+    try {
+      const res = await fetch(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(trimmed)}.json` +
+          `?access_token=${MAPBOX_TOKEN}&limit=1`
+      );
+      const data = await res.json();
+      if (data.features?.length > 0) {
+        selectSuggestion(data.features[0]);
+      } else {
+        setFetchError("Location not found. Try a different search.");
+      }
+    } catch {
+      setFetchError("Geocoding failed. Check your connection.");
+    }
     setSearching(false);
   }
 
-  function useCurrentLocation() {
-    navigator.geolocation.getCurrentPosition((pos) => {
-      const { latitude, longitude } = pos.coords;
-
-      setUserLocation({ latitude, longitude });
-      setSearchLocation({ latitude, longitude });
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (!suggestions.length) {
+      if (e.key === "Enter") handleSearch();
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIndex((i) => Math.min(i + 1, suggestions.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex((i) => Math.max(i - 1, -1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (activeIndex >= 0) selectSuggestion(suggestions[activeIndex]);
+      else handleSearch();
+    } else if (e.key === "Escape") {
       setSuggestions([]);
-    });
+      setActiveIndex(-1);
+    }
   }
 
-  // 🔁 LOAD DATA
-  useEffect(() => {
-    const loadPlaces = async (lat: number, lon: number) => {
-      setLoading(true);
+  function useCurrentLocation() {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const loc = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        setUserLocation(loc);
+        setSearchLocation(loc);
+        setLocationQuery(`${pos.coords.latitude.toFixed(5)}, ${pos.coords.longitude.toFixed(5)}`);
+      },
+      () => setFetchError("Could not access your location.")
+    );
+  }
 
-      const rawPlaces = await fetchCafes(lat, lon);
+  // ── Shortlist ─────────────────────────────────────────────────────────────────
 
-      const filtered = rawPlaces.filter(
-        (p: any) => p.tags && p.tags.name && p.tags.name.length > 2
-      );
+  function placeKey(p: EnrichedPlace) {
+    return `${p.lat.toFixed(6)}-${p.lon.toFixed(6)}`;
+  }
 
-      const unique = Array.from(
-        new Map(filtered.map((p: any) => [p.tags.name, p])).values()
-      );
+  function toggleShortlist(place: EnrichedPlace) {
+    const key = placeKey(place);
+    setShortlist((prev) =>
+      prev.some((p) => placeKey(p) === key)
+        ? prev.filter((p) => placeKey(p) !== key)
+        : [...prev, place]
+    );
+  }
 
-      const enriched = unique.map((place: any) => {
-        const cost = estimateCost(place);
+  function isShortlisted(place: EnrichedPlace) {
+    return shortlist.some((p) => placeKey(p) === placeKey(place));
+  }
 
-        return {
-          ...place,
-          distance: getDistance(lat, lon, place.lat, place.lon),
-          estimatedCostForTwo: cost,
-        };
-      });
+  // ── Render ────────────────────────────────────────────────────────────────────
 
-      enriched.sort((a: any, b: any) => getScore(b) - getScore(a));
-
-      setPlaces(enriched.slice(0, 20));
-      setLoading(false);
-    };
-
-    if (searchLocation) {
-      loadPlaces(searchLocation.latitude, searchLocation.longitude);
-    } else {
-      navigator.geolocation.getCurrentPosition((pos) => {
-        const { latitude, longitude } = pos.coords;
-        setUserLocation({ latitude, longitude });
-        loadPlaces(latitude, longitude);
-      });
-    }
-  }, [searchLocation, radius]);
-
-  const isLatLng = /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(locationQuery);
+  const displayedPlaces = activeTab === "shortlist" ? shortlist : places;
 
   return (
-    <main className="min-h-screen bg-black text-white p-6">
-      <h1 className="text-3xl font-bold mb-6">🍽️ Cafe Finder</h1>
+    <main className="min-h-screen bg-[#0a0a0f] text-white font-sans">
+      {/* Header */}
+      <div className="sticky top-0 z-20 bg-[#0a0a0f]/90 backdrop-blur border-b border-white/5 px-4 py-4">
+        <div className="max-w-2xl mx-auto space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">🍽️</span>
+            <h1 className="text-xl font-bold tracking-tight">Cafe Finder</h1>
+          </div>
 
-      {/* 🔍 SEARCH */}
-      <div className="flex gap-2 mb-2">
-        <input
-          type="text"
-          placeholder="Search place OR lat,lng (22.57,88.36)"
-          value={locationQuery}
-          onChange={(e) => {
-            const value = e.target.value;
-            setLocationQuery(value);
+          {/* Search row */}
+          <div className="relative flex gap-2">
+            <div className="relative flex-1">
+              <input
+                ref={inputRef}
+                type="text"
+                placeholder="Search place or lat,lng (22.57,88.36)…"
+                value={locationQuery}
+                onChange={(e) => {
+                  setLocationQuery(e.target.value);
+                  fetchSuggestions(e.target.value);
+                }}
+                onKeyDown={handleKeyDown}
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm placeholder:text-white/30 focus:outline-none focus:border-white/30 transition-colors"
+              />
 
-            if (!/^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(value)) {
-              fetchSuggestions(value);
-            } else {
-              setSuggestions([]);
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              if (activeIndex >= 0) {
-                selectSuggestion(suggestions[activeIndex]);
-              } else {
-                handleSearch();
-              }
-            }
-
-            if (e.key === "ArrowDown") {
-              setActiveIndex((prev) =>
-                prev < suggestions.length - 1 ? prev + 1 : prev
-              );
-            }
-
-            if (e.key === "ArrowUp") {
-              setActiveIndex((prev) => (prev > 0 ? prev - 1 : 0));
-            }
-          }}
-          className="bg-gray-800 p-2 rounded w-full"
-        />
-
-        <button
-          onClick={handleSearch}
-          className="bg-blue-600 px-4 rounded flex items-center justify-center"
-        >
-          {searching ? (
-            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-          ) : (
-            "🔍"
-          )}
-        </button>
-
-        <button
-          onClick={useCurrentLocation}
-          className="bg-green-600 px-4 rounded"
-        >
-          🧭
-        </button>
-      </div>
-
-      {/* 🔽 AUTOCOMPLETE */}
-      {!isLatLng && suggestions.length > 0 && (
-        <div className="bg-gray-900 rounded mb-4">
-          {suggestions.map((s, i) => (
-            <div
-              key={i}
-              onClick={() => selectSuggestion(s)}
-              className={`p-2 cursor-pointer ${
-                i === activeIndex ? "bg-gray-700" : "hover:bg-gray-700"
-              }`}
-            >
-              {s.place_name}
+              {/* Suggestions dropdown */}
+              {suggestions.length > 0 && (
+                <div
+                  ref={suggestionsRef}
+                  className="absolute top-full mt-1 left-0 right-0 z-30 bg-[#141420] border border-white/10 rounded-lg overflow-hidden shadow-xl"
+                >
+                  {suggestions.map((s, i) => (
+                    <button
+                      key={s.place_name}
+                      onMouseDown={(e) => {
+                        e.preventDefault(); // prevent input blur
+                        selectSuggestion(s);
+                      }}
+                      className={`w-full text-left px-3 py-2 text-sm transition-colors ${
+                        i === activeIndex
+                          ? "bg-indigo-600/50 text-white"
+                          : "hover:bg-white/5 text-white/70"
+                      }`}
+                    >
+                      {s.place_name}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-          ))}
+
+            <button
+              onClick={handleSearch}
+              disabled={searching}
+              className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-4 rounded-lg text-sm font-medium transition-colors"
+            >
+              {searching ? "…" : "Search"}
+            </button>
+
+            <button
+              onClick={useCurrentLocation}
+              title="Use my location"
+              className="bg-white/10 hover:bg-white/15 px-3 rounded-lg text-lg transition-colors"
+            >
+              🧭
+            </button>
+          </div>
+
+          {/* Filter row */}
+          <div className="flex gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-white/40">Sort</label>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+                className="bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-white/25"
+              >
+                <option value="score">Best Match</option>
+                <option value="distance">Nearest</option>
+                <option value="price">Cheapest</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-white/40">Radius</label>
+              <select
+                value={radius}
+                onChange={(e) => setRadius(Number(e.target.value))}
+                className="bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-white/25"
+              >
+                <option value={1000}>1 km</option>
+                <option value={2000}>2 km</option>
+                <option value={4000}>4 km</option>
+              </select>
+            </div>
+          </div>
         </div>
-      )}
-
-      {/* 📏 RADIUS */}
-      <select
-        value={radius}
-        onChange={(e) => setRadius(Number(e.target.value))}
-        className="bg-gray-800 p-2 rounded mb-4"
-      >
-        <option value={1000}>1 km</option>
-        <option value={2000}>2 km</option>
-        <option value={4000}>4 km</option>
-      </select>
-
-      {/* 🗺️ MAP */}
-      {userLocation && (
-        <MapView
-          places={places}
-          userLocation={userLocation}
-          selectedPlace={selectedPlace}
-          onSelectPlace={setSelectedPlace}
-        />
-      )}
-
-      {/* ⭐ SHORTLIST DEBUG (LOGIC VIEW) */}
-      <div className="mb-4 text-sm text-gray-400">
-        Shortlisted: {shortlist.length}
       </div>
 
-      {/* 📋 LIST */}
-      <div className="grid gap-4">
-        {loading ? (
-          <p>Loading...</p>
-        ) : (
-          places.map((place, i) => {
-            const cost = place.estimatedCostForTwo;
-            const added = isShortlisted(place);
+      <div className="max-w-2xl mx-auto px-4 py-4 space-y-4">
+        {/* Error banner */}
+        {fetchError && (
+          <div className="bg-rose-500/10 border border-rose-500/30 text-rose-400 text-sm rounded-lg px-4 py-3 flex items-center justify-between">
+            <span>{fetchError}</span>
+            <button onClick={() => setFetchError(null)} className="ml-4 text-rose-400/60 hover:text-rose-400">
+              ✕
+            </button>
+          </div>
+        )}
 
-            return (
+        {/* Map */}
+        {userLocation && (
+          <div className="rounded-xl overflow-hidden border border-white/10">
+            <MapView
+              places={places}
+              userLocation={userLocation}
+              selectedPlace={selectedPlace}
+              onSelectPlace={setSelectedPlace}
+            />
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+          <button
+            onClick={() => setActiveTab("all")}
+            className={`flex-1 py-1.5 text-sm rounded-md font-medium transition-colors ${
+              activeTab === "all"
+                ? "bg-white/10 text-white"
+                : "text-white/40 hover:text-white/60"
+            }`}
+          >
+            All Places{" "}
+            {!loading && (
+              <span className="text-xs text-white/30">({places.length})</span>
+            )}
+          </button>
+          <button
+            onClick={() => setActiveTab("shortlist")}
+            className={`flex-1 py-1.5 text-sm rounded-md font-medium transition-colors ${
+              activeTab === "shortlist"
+                ? "bg-white/10 text-white"
+                : "text-white/40 hover:text-white/60"
+            }`}
+          >
+            ⭐ Shortlist{" "}
+            {shortlist.length > 0 && (
+              <span className="text-xs text-indigo-400">({shortlist.length})</span>
+            )}
+          </button>
+        </div>
+
+        {/* List */}
+        {loading ? (
+          <div className="space-y-3">
+            {[...Array(6)].map((_, i) => (
               <div
                 key={i}
-                onClick={() => setSelectedPlace(place)}
-                className="bg-gray-900 p-4 rounded cursor-pointer"
-              >
-                <h2 className="text-lg font-semibold">
-                  {place.tags.name}
-                </h2>
+                className="bg-white/5 rounded-xl h-24 animate-pulse"
+                style={{ animationDelay: `${i * 80}ms` }}
+              />
+            ))}
+          </div>
+        ) : displayedPlaces.length === 0 ? (
+          <div className="text-center py-16 text-white/30 text-sm">
+            {activeTab === "shortlist"
+              ? "No places shortlisted yet — tap ☆ on any result."
+              : "No places found. Try increasing the radius."}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {displayedPlaces.map((place, i) => {
+              const added = isShortlisted(place);
+              const isSelected =
+                selectedPlace && placeKey(selectedPlace) === placeKey(place);
 
-                <p className="text-gray-400 text-sm">
-                  📏 {place.distance.toFixed(2)} km away
-                </p>
-
-                <p className={`${getPriceColor(cost)} text-sm`}>
-                  💰 ₹{cost} for two
-                </p>
-
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleShortlist(place);
-                  }}
-                  className="mt-2 text-sm"
+              return (
+                <div
+                  key={placeKey(place)}
+                  onClick={() => setSelectedPlace(place)}
+                  className={`group relative bg-white/[0.03] hover:bg-white/[0.06] border rounded-xl p-4 cursor-pointer transition-all ${
+                    isSelected
+                      ? "border-indigo-500/60 bg-indigo-500/5"
+                      : "border-white/[0.06]"
+                  }`}
                 >
-                  {added ? "⭐ Added" : "☆ Add"}
-                </button>
-              </div>
-            );
-          })
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h2 className="font-semibold truncate">{place.tags.name}</h2>
+                      <div className="flex items-center gap-3 mt-1 text-sm text-white/40">
+                        <span>📏 {place.distance.toFixed(2)} km</span>
+                        <span className={getPriceColor(place.estimatedCostForTwo)}>
+                          {getPriceLabel(place.estimatedCostForTwo)} ₹{place.estimatedCostForTwo}
+                        </span>
+                        <span className="capitalize text-white/25">
+                          {place.tags.amenity}
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleShortlist(place);
+                      }}
+                      title={added ? "Remove from shortlist" : "Add to shortlist"}
+                      className={`flex-shrink-0 text-xl leading-none transition-transform active:scale-90 ${
+                        added ? "text-amber-400" : "text-white/20 hover:text-white/50"
+                      }`}
+                    >
+                      {added ? "⭐" : "☆"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </main>
