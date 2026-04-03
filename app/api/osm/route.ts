@@ -1,54 +1,56 @@
 // app/api/osm/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
-// Set SKIP_OSM=true in .env.local to bypass OSM entirely during local dev.
-// OSM mirrors are often blocked by Indian ISPs — works fine on Vercel in prod.
 const SKIP_OSM = process.env.SKIP_OSM === "true";
 
 const MIRRORS = [
-  "https://overpass.kumi.systems/api/interpreter",        // Best for Asia
-  "https://overpass.private.coffee/api/interpreter",      // Europe, reliable
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
   "https://overpass-api.de/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   "https://overpass.openstreetmap.ru/api/interpreter",
 ];
 
-// Fresh cache: 5 minutes
-const cache = new Map<string, { data: unknown; expires: number }>();
-const CACHE_TTL_MS = 5 * 60 * 1000;
+// ─── 3-layer cache ────────────────────────────────────────────────────────────
+// L1 FRESH  — expires 10 min  — instant return, no network
+// L2 WARM   — expires 60 min  — instant return + silent background revalidation
+// L3 STALE  — never expires   — last resort when mirrors are all dead
 
-// Stale cache: never expires — serves last known good data when all mirrors fail
+const freshCache = new Map<string, { data: unknown; expires: number }>();
+const warmCache  = new Map<string, { data: unknown; expires: number }>();
 const staleCache = new Map<string, unknown>();
 
-// Deduplicates concurrent identical requests
-const inFlight = new Map<string, Promise<any>>();
+const FRESH_TTL = 10 * 60 * 1000;
+const WARM_TTL  = 60 * 60 * 1000;
 
-// Per-mirror cooldown after failure
+// In-flight dedup — prevents hammering mirrors with identical concurrent requests
+const inFlight = new Map<string, Promise<unknown>>();
+
+// ─── Mirror health tracking ───────────────────────────────────────────────────
+
 const mirrorCooldown = new Map<string, number>();
-const COOLDOWN_MS = 60_000; // 60s cooldown per failed mirror
+const mirrorStats    = new Map<string, { success: number; fail: number }>();
+const COOLDOWN_MS    = 90_000;
 
-// Per-mirror success/fail tracking for smart sorting
-const mirrorStats = new Map<string, { success: number; fail: number }>();
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function getMirrorSuccessRate(mirror: string): number {
+function getMirrorScore(mirror: string): number {
   const s = mirrorStats.get(mirror) ?? { success: 0, fail: 0 };
   return s.success / (s.success + s.fail + 1);
 }
 
-function recordMirrorSuccess(mirror: string) {
+function recordSuccess(mirror: string) {
   const s = mirrorStats.get(mirror) ?? { success: 0, fail: 0 };
   mirrorStats.set(mirror, { success: s.success + 1, fail: s.fail });
+  mirrorCooldown.delete(mirror);
 }
 
-function recordMirrorFail(mirror: string) {
+function recordFail(mirror: string) {
   const s = mirrorStats.get(mirror) ?? { success: 0, fail: 0 };
   mirrorStats.set(mirror, { success: s.success, fail: s.fail + 1 });
   mirrorCooldown.set(mirror, Date.now() + COOLDOWN_MS);
 }
 
-// Each mirror gets its own AbortController — no cross-contamination
+// ─── Fetch helpers ────────────────────────────────────────────────────────────
+
 function fetchWithTimeout(
   url: string,
   options: RequestInit,
@@ -56,110 +58,102 @@ function fetchWithTimeout(
 ): { promise: Promise<Response>; abort: () => void } {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
-  const promise = fetch(url, { ...options, signal: controller.signal }).finally(
-    () => clearTimeout(id)
-  );
+  const promise = fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(id));
   return { promise, abort: () => controller.abort() };
 }
 
-// Validates a mirror Response — throws on bad status or non-JSON
-function handleMirrorResponse(mirror: string) {
+function handleResponse(mirror: string) {
   return async (res: Response): Promise<{ data: unknown; mirror: string }> => {
     if (!res.ok) {
-      recordMirrorFail(mirror);
+      recordFail(mirror);
       throw new Error(`${mirror} → HTTP ${res.status}`);
     }
-    const contentType = res.headers.get("content-type") ?? "";
-    if (!contentType.includes("application/json")) {
-      recordMirrorFail(mirror);
-      throw new Error(`${mirror} → non-JSON response`);
+    const ct = res.headers.get("content-type") ?? "";
+    if (!ct.includes("application/json")) {
+      recordFail(mirror);
+      throw new Error(`${mirror} → non-JSON`);
     }
     const data = await res.json();
     return { data, mirror };
   };
 }
 
-// One attempt across all active mirrors.
-// Best mirror gets a 500ms head start, then all others race.
-// Returns null if every mirror fails.
-async function tryOSM(body: string, timeoutMs: number): Promise<unknown | null> {
+// ─── Core OSM fetch — races all mirrors, best gets 400ms head start ───────────
+
+async function fetchFromOSM(body: string, timeoutMs: number): Promise<unknown | null> {
   const now = Date.now();
 
-  const activeMirrors = MIRRORS
-    .filter((m) => {
-      const blocked = mirrorCooldown.get(m);
-      return !blocked || blocked < now;
-    })
-    .sort((a, b) => getMirrorSuccessRate(b) - getMirrorSuccessRate(a));
+  const active = MIRRORS
+    .filter(m => { const b = mirrorCooldown.get(m); return !b || b < now; })
+    .sort((a, b) => getMirrorScore(b) - getMirrorScore(a));
 
-  if (activeMirrors.length === 0) {
+  if (active.length === 0) {
     console.warn("[OSM] All mirrors in cooldown");
     return null;
   }
 
-  const fetchOptions: RequestInit = {
+  const opts: RequestInit = {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   };
 
-  const [bestMirror, ...restMirrors] = activeMirrors;
-  const bestFetcher = fetchWithTimeout(bestMirror, fetchOptions, timeoutMs);
+  const [best, ...rest] = active;
+  const bestFetcher = fetchWithTimeout(best, opts, timeoutMs);
   const restFetchers: ReturnType<typeof fetchWithTimeout>[] = [];
 
-  const bestPromise = bestFetcher.promise.then(handleMirrorResponse(bestMirror));
+  const bestPromise = bestFetcher.promise.then(handleResponse(best));
 
-  // Rest fire after 500ms head start — only if best hasn't resolved yet
-  const restRacePromise = new Promise<never>((_, reject) =>
-    setTimeout(reject, 500, new Error("head-start-delay"))
+  const restPromise = new Promise<never>((_, rej) =>
+    setTimeout(rej, 400, new Error("head-start"))
   ).catch(() => {
-    if (restMirrors.length === 0) return Promise.reject(new Error("no-rest-mirrors"));
-    restMirrors.forEach((m) =>
-      restFetchers.push(fetchWithTimeout(m, fetchOptions, timeoutMs))
-    );
+    if (rest.length === 0) return Promise.reject(new Error("no-rest"));
+    rest.forEach(m => restFetchers.push(fetchWithTimeout(m, opts, timeoutMs)));
     return Promise.any(
-      restFetchers.map(({ promise }, i) =>
-        promise.then(handleMirrorResponse(restMirrors[i]))
-      )
+      restFetchers.map(({ promise }, i) => promise.then(handleResponse(rest[i])))
     );
   });
 
   try {
-    const result = await Promise.any([bestPromise, restRacePromise]);
-
-    // Cancel all losers
+    const result = await Promise.any([bestPromise, restPromise]);
     bestFetcher.abort();
-    restFetchers.forEach(({ abort }) => abort());
-
-    recordMirrorSuccess(result.mirror);
+    restFetchers.forEach(f => f.abort());
+    recordSuccess(result.mirror);
     return result.data;
-
   } catch (err: any) {
     bestFetcher.abort();
-    restFetchers.forEach(({ abort }) => abort());
-
-    // Only log real errors — ignore AbortError noise from cancellation
+    restFetchers.forEach(f => f.abort());
     if (err instanceof AggregateError) {
       const real = err.errors.filter((e: any) => e?.name !== "AbortError");
-      if (real.length > 0) {
-        console.error("[OSM] All mirrors failed:", real.map((e: any) => e?.message));
-      }
-    } else if (
-      err?.name !== "AbortError" &&
-      err?.message !== "head-start-delay" &&
-      err?.message !== "no-rest-mirrors"
-    ) {
-      console.error("[OSM] Unexpected error:", err?.message);
+      if (real.length) console.error("[OSM] All mirrors failed:", real.map((e: any) => e?.message));
+    } else if (!["AbortError", "head-start", "no-rest"].includes(err?.message ?? "")) {
+      console.error("[OSM] Unexpected:", err?.message);
     }
-
     return null;
   }
+}
+
+// ─── Background revalidation ──────────────────────────────────────────────────
+
+function revalidateInBackground(cacheKey: string, body: string) {
+  if (inFlight.has(cacheKey)) return; // already revalidating
+  const p = (async () => {
+    const data = await fetchFromOSM(body, 8_000);
+    if (data !== null) {
+      freshCache.set(cacheKey, { data, expires: Date.now() + FRESH_TTL });
+      warmCache.set(cacheKey,  { data, expires: Date.now() + WARM_TTL });
+      staleCache.set(cacheKey, data);
+      console.log("[OSM] Background revalidation complete for", cacheKey.slice(0, 40));
+    }
+  })();
+  inFlight.set(cacheKey, p);
+  p.finally(() => inFlight.delete(cacheKey));
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  // In .env.local: SKIP_OSM=true → return empty immediately so Mapbox fills in
   if (SKIP_OSM) {
     return NextResponse.json(
       { elements: [], error: "OSM_SKIPPED" },
@@ -168,50 +162,78 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.text();
+  // NOTE: cache key is body (lat/lon/radius) — does NOT include sort order.
+  // Sorting is done client-side so changing sort never triggers a re-fetch.
   const cacheKey = body.trim();
+  const now = Date.now();
 
-  // 1. Fresh cache hit
-  const cached = cache.get(cacheKey);
-  if (cached && cached.expires > Date.now()) {
-    return NextResponse.json(cached.data, { headers: { "X-Cache": "HIT" } });
+  // ── L1: Fresh cache — instant, no network ─────────────────────────────────
+  const fresh = freshCache.get(cacheKey);
+  if (fresh && fresh.expires > now) {
+    return NextResponse.json(fresh.data, { headers: { "X-Cache": "FRESH" } });
   }
 
-  // 2. Deduplicate — wait for in-flight identical request if one exists
+  // ── L2: Warm cache — instant return + revalidate silently in background ───
+  const warm = warmCache.get(cacheKey);
+  if (warm && warm.expires > now) {
+    revalidateInBackground(cacheKey, body);
+    return NextResponse.json(warm.data, { headers: { "X-Cache": "WARM" } });
+  }
+
+  // ── In-flight dedup ───────────────────────────────────────────────────────
   if (inFlight.has(cacheKey)) {
     const data = await inFlight.get(cacheKey)!;
     return NextResponse.json(data, { headers: { "X-Cache": "IN-FLIGHT" } });
   }
 
-  const requestPromise = (async () => {
-    // First attempt — fail fast at 6s so the UI doesn't freeze
-    let data = await tryOSM(body, 6_000);
+  // ── L3: Full network fetch ────────────────────────────────────────────────
+  const fetchPromise = (async (): Promise<unknown> => {
+    // First attempt — 6s timeout
+    let data = await fetchFromOSM(body, 6_000);
 
-    // One retry after 500ms with a slightly longer window
+    if (data === null && staleCache.has(cacheKey)) {
+      // We have stale data — return it immediately and revalidate in background
+      // User sees something instantly instead of waiting another 8s
+      console.warn("[OSM] First attempt failed — serving stale instantly, retrying in background");
+      const stale = staleCache.get(cacheKey)!;
+      setTimeout(async () => {
+        const fresh = await fetchFromOSM(body, 8_000);
+        if (fresh !== null) {
+          freshCache.set(cacheKey, { data: fresh, expires: Date.now() + FRESH_TTL });
+          warmCache.set(cacheKey,  { data: fresh, expires: Date.now() + WARM_TTL });
+          staleCache.set(cacheKey, fresh);
+        }
+      }, 0);
+      return stale;
+    }
+
     if (data === null) {
-      console.warn("[OSM] First attempt failed, retrying...");
-      await new Promise((r) => setTimeout(r, 500));
-      data = await tryOSM(body, 8_000);
+      // No stale data — single retry, user waits
+      console.warn("[OSM] First attempt failed, no stale cache — retrying...");
+      await new Promise(r => setTimeout(r, 300));
+      data = await fetchFromOSM(body, 8_000);
     }
 
     if (data !== null) {
-      cache.set(cacheKey, { data, expires: Date.now() + CACHE_TTL_MS });
+      freshCache.set(cacheKey, { data, expires: Date.now() + FRESH_TTL });
+      warmCache.set(cacheKey,  { data, expires: Date.now() + WARM_TTL });
       staleCache.set(cacheKey, data);
       return data;
     }
 
-    // Serve stale cache — better than empty results
+    // Absolute last resort
     if (staleCache.has(cacheKey)) {
-      console.warn("[OSM] Serving stale cache for this query");
-      return staleCache.get(cacheKey);
+      console.warn("[OSM] All attempts failed — serving stale cache");
+      return staleCache.get(cacheKey)!;
     }
 
-    console.error("[OSM] All mirrors failed, no stale cache available");
+    console.error("[OSM] Total failure — no data available");
     return { elements: [], error: "OSM_UNAVAILABLE" };
   })();
 
-  inFlight.set(cacheKey, requestPromise);
+  inFlight.set(cacheKey, fetchPromise);
   try {
-    const data = await requestPromise;
+    const data = await fetchPromise;
     return NextResponse.json(data, { headers: { "X-Cache": "MISS" } });
   } finally {
     inFlight.delete(cacheKey);
