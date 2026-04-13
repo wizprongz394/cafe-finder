@@ -27,15 +27,15 @@ interface GroupUser {
 interface GroupEnrichedPlace extends EnrichedPlace {
   groupScore: number; maxDistanceKm: number; avgDistanceKm: number;
   budgetOk: boolean[]; prefMatches: string[];
+  userPain: number[];
 }
 interface SplitMatch {
-  placeA: EnrichedPlace;
-  placeB: EnrichedPlace;
-  distanceBetween: number;
-  score: number;
+  placeA: EnrichedPlace; placeB: EnrichedPlace;
+  distanceBetween: number; score: number;
   assignment: Record<string, "A" | "B" | "either">;
-  reasons: string[];
+  reasons: string[]; walkMinutes: number;
 }
+interface PlanResult { text: string; meetupFlow: string[]; fairnessSummary: string; }
 interface MapboxFeature { center: [number, number]; place_name: string; text: string; }
 
 // ─── Price database ───────────────────────────────────────────────────────────
@@ -141,9 +141,17 @@ function computeScore(p: EnrichedPlace): number {
   if (p.distance > 3 && p.estimatedCostForTwo < 250) s -= 3;
   return s;
 }
+function computeUserPain(place: EnrichedPlace, user: GroupUser): number {
+  if (!user.location) return 0;
+  const dist = haversineKm(user.location.latitude, user.location.longitude, place.lat, place.lon);
+  const budgetOverrun = Math.max(0, place.estimatedCostForTwo - user.maxBudget);
+  const txt = (place.tags.name + " " + (place.tags.cuisine ?? "") + " " + (place.tags.mapbox_cats ?? "")).toLowerCase();
+  const prefMiss = user.preferences.length > 0 && !user.preferences.some(p => txt.includes(p.toLowerCase())) ? 4 : 0;
+  return dist * 3 + budgetOverrun / 100 + prefMiss;
+}
 function scoreForGroup(place: EnrichedPlace, users: GroupUser[]): Omit<GroupEnrichedPlace, keyof EnrichedPlace> {
   const active = users.filter(u => u.location !== null);
-  if (!active.length) return { groupScore: 0, maxDistanceKm: 0, avgDistanceKm: 0, budgetOk: [], prefMatches: [] };
+  if (!active.length) return { groupScore: 0, maxDistanceKm: 0, avgDistanceKm: 0, budgetOk: [], prefMatches: [], userPain: [] };
   const dists = active.map(u => haversineKm(u.location!.latitude, u.location!.longitude, place.lat, place.lon));
   const avg = dists.reduce((a, b) => a + b, 0) / dists.length;
   const max = Math.max(...dists);
@@ -154,36 +162,25 @@ function scoreForGroup(place: EnrichedPlace, users: GroupUser[]): Omit<GroupEnri
   const prefMatches: string[] = [];
   for (const u of active) for (const pref of u.preferences)
     if (txt.includes(pref.toLowerCase()) && !prefMatches.includes(pref)) prefMatches.push(pref);
+  const userPain = active.map(u => computeUserPain(place, u));
   const groupScore = -avg * 4 - max * 2 - variance * 3 + budgetScore * 15 + prefMatches.length * 10 + (place.estimatedCostForTwo >= 200 && place.estimatedCostForTwo <= 1000 ? 5 : 0);
-  return { groupScore, maxDistanceKm: max, avgDistanceKm: avg, budgetOk, prefMatches };
+  return { groupScore, maxDistanceKm: max, avgDistanceKm: avg, budgetOk, prefMatches, userPain };
 }
-
-// ─── Split match engine ───────────────────────────────────────────────────────
-
 function findSplitMatches(places: EnrichedPlace[], users: GroupUser[]): SplitMatch[] {
   const active = users.filter(u => u.location);
   if (active.length < 2) return [];
-
   const allPrefs = active.flatMap(u => u.preferences);
-  const uniquePrefs = new Set(allPrefs);
-  const hasConflict = uniquePrefs.size > 1;
-
+  const hasConflict = new Set(allPrefs).size > 1;
   const results: SplitMatch[] = [];
-  const limit = Math.min(places.length, 80);
-
-  for (let i = 0; i < limit; i++) {
-    for (let j = i + 1; j < limit; j++) {
-      const A = places[i];
-      const B = places[j];
-
+  const pool = places.slice(0, 80);
+  for (let i = 0; i < pool.length; i++) {
+    for (let j = i + 1; j < pool.length; j++) {
+      const A = pool[i]; const B = pool[j];
       const dist = haversineKm(A.lat, A.lon, B.lat, B.lon);
-      if (dist > 0.5) continue; // 500m max between places
-
-      let score = 0;
-      let satisfiedUsers = 0;
+      if (dist > 0.5) continue;
+      let score = 0, satisfiedUsers = 0;
       const reasons: string[] = [];
       const assignment: Record<string, "A" | "B" | "either"> = {};
-
       for (const user of active) {
         const txtA = ((A.tags.name ?? "") + " " + (A.tags.cuisine ?? "") + " " + (A.tags.mapbox_cats ?? "")).toLowerCase();
         const txtB = ((B.tags.name ?? "") + " " + (B.tags.cuisine ?? "") + " " + (B.tags.mapbox_cats ?? "")).toLowerCase();
@@ -191,54 +188,36 @@ function findSplitMatches(places: EnrichedPlace[], users: GroupUser[]): SplitMat
         const prefB = user.preferences.some(p => txtB.includes(p.toLowerCase()));
         const budgetA = A.estimatedCostForTwo <= user.maxBudget;
         const budgetB = B.estimatedCostForTwo <= user.maxBudget;
-
-        if (prefA && budgetA && prefB && budgetB) {
-          assignment[user.id] = "either";
-          satisfiedUsers++;
-          score += 8;
-        } else if (prefA && budgetA) {
-          assignment[user.id] = "A";
-          satisfiedUsers++;
-          score += 10;
-        } else if (prefB && budgetB) {
-          assignment[user.id] = "B";
-          satisfiedUsers++;
-          score += 10;
-        } else if (budgetA || budgetB) {
-          assignment[user.id] = budgetA ? "A" : "B";
-          score += 3;
-        } else {
-          score -= 5;
-        }
+        if (prefA && budgetA && prefB && budgetB) { assignment[user.id] = "either"; satisfiedUsers++; score += 8; }
+        else if (prefA && budgetA) { assignment[user.id] = "A"; satisfiedUsers++; score += 10; }
+        else if (prefB && budgetB) { assignment[user.id] = "B"; satisfiedUsers++; score += 10; }
+        else if (budgetA || budgetB) { assignment[user.id] = budgetA ? "A" : "B"; score += 3; }
+        else score -= 5;
       }
-
-      // Reward closeness
       score += Math.max(0, 8 - dist * 15);
-
-      // Boost if preferences actually conflict (this is where split shines)
       if (hasConflict) score += 12;
-
-      // Bonus if A and B are different categories (complementary)
       if (A.tags.amenity !== B.tags.amenity) score += 4;
-
-      // Must satisfy most of the group
       if (satisfiedUsers < Math.ceil(active.length * 0.6)) continue;
-
-      // Build reasons
-      const aName = A.tags.name;
-      const bName = B.tags.name;
-      if (dist < 0.15) reasons.push(`Just ${Math.round(dist * 1000)}m apart — easy to split up and meet after`);
-      if (A.tags.amenity !== B.tags.amenity) reasons.push(`Different vibes: ${A.tags.amenity.replace("_"," ")} + ${B.tags.amenity.replace("_"," ")}`);
-      if (hasConflict) reasons.push("Everyone gets their preference");
-
-      results.push({ placeA: A, placeB: B, distanceBetween: dist, score, assignment, reasons });
+      const walkMinutes = Math.max(1, Math.round(dist * 12));
+      if (dist < 0.15) reasons.push(`${Math.round(dist * 1000)}m apart — ~${walkMinutes} min walk`);
+      if (A.tags.amenity !== B.tags.amenity) reasons.push(`${A.tags.amenity.replace("_", " ")} + ${B.tags.amenity.replace("_", " ")}`);
+      if (hasConflict) reasons.push("Everyone's preference covered");
+      results.push({ placeA: A, placeB: B, distanceBetween: dist, score, assignment, reasons, walkMinutes });
     }
   }
-
   return results.sort((a, b) => b.score - a.score).slice(0, 8);
 }
-
-// ─── Display helpers ──────────────────────────────────────────────────────────
+function generateMeetupFlow(match: SplitMatch, users: GroupUser[]): string[] {
+  const active = users.filter(u => u.location);
+  const goA = active.filter(u => match.assignment[u.id] === "A" || match.assignment[u.id] === "either");
+  const goB = active.filter(u => match.assignment[u.id] === "B");
+  const steps: string[] = [];
+  if (goA.length > 0) steps.push(`${placeEmojiFromPlace(match.placeA)} ${goA.map(u => u.label).join(" & ")} → ${match.placeA.tags.name}`);
+  if (goB.length > 0) steps.push(`${placeEmojiFromPlace(match.placeB)} ${goB.map(u => u.label).join(" & ")} → ${match.placeB.tags.name}`);
+  steps.push(`🚶 Walk ${Math.round(match.distanceBetween * 1000)}m (~${match.walkMinutes} min) to meet up`);
+  steps.push(`☕ Regroup — grab a drink, chat, decide next move`);
+  return steps;
+}
 
 function priceColor(cost: number) {
   if (cost <= 400) return "text-emerald-400";
@@ -253,7 +232,7 @@ function categoryEmoji(amenity: string) {
   if (amenity === "cafe") return "☕"; if (amenity === "fast_food") return "🍔";
   if (amenity === "bar") return "🍺"; return "🍽️";
 }
-function placeEmoji(place: EnrichedPlace): string {
+function placeEmojiFromPlace(place: EnrichedPlace): string {
   const n = place.tags.name.toLowerCase();
   if (/momo|dumpling/.test(n)) return "🥟";
   if (/biryani|rice/.test(n)) return "🍚";
@@ -261,10 +240,38 @@ function placeEmoji(place: EnrichedPlace): string {
   if (/burger/.test(n)) return "🍔";
   if (/cake|pastry|bakery/.test(n)) return "🥐";
   if (/sweet|mithai|ice.?cream/.test(n)) return "🍰";
-  if (/tea|chai/.test(n)) return "🍵";
+  if (/\btea\b|chai/.test(n)) return "🍵";
   if (/coffee|cafe/.test(n)) return "☕";
   if (/chinese|noodle/.test(n)) return "🍜";
+  if (/fish|seafood/.test(n)) return "🐟";
+  if (/kebab|tandoor/.test(n)) return "🍢";
+  if (/roll|wrap/.test(n)) return "🌯";
   return categoryEmoji(place.tags.amenity);
+}
+function fairnessLabel(pain: number): { emoji: string; color: string } {
+  if (pain < 2)  return { emoji: "😊", color: "text-emerald-400" };
+  if (pain < 5)  return { emoji: "🙂", color: "text-amber-400" };
+  if (pain < 9)  return { emoji: "😐", color: "text-orange-400" };
+  return              { emoji: "😔", color: "text-rose-400" };
+}
+
+// Clean COT prompt — no markdown leak
+function buildExplainPrompt(match: SplitMatch, users: GroupUser[]): string {
+  const active = users.filter(u => u.location);
+  const userLines = active.map(u => {
+    const dest = match.assignment[u.id] === "B" ? match.placeB : match.placeA;
+    return `${u.label} (likes: ${u.preferences.join(", ") || "anything"}, budget ₹${u.maxBudget}) → ${dest.tags.name}`;
+  }).join("\n");
+
+  return `You are a warm, witty local food guide in India. Write ONE short paragraph (2-3 sentences) explaining why this eating plan is great for this group. Output ONLY the plain text paragraph — no thinking steps, no headers, no markdown, no bullet points, no asterisks.
+
+Group plan: ${active.length} friends eat at different nearby spots then meet up.
+- ${match.placeA.tags.name} (${match.placeA.tags.amenity.replace("_"," ")}, ≈₹${match.placeA.estimatedCostForTwo})
+- ${match.placeB.tags.name} (${match.placeB.tags.amenity.replace("_"," ")}, ≈₹${match.placeB.estimatedCostForTwo})
+- Only ${Math.round(match.distanceBetween * 1000)}m apart (~${match.walkMinutes} min walk between them)
+${userLines}
+
+Write a warm, specific 2-sentence explanation mentioning the actual place names. Sound like a friend, not a system. Plain text only.`;
 }
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
@@ -292,6 +299,8 @@ export default function Home() {
   const [loading,      setLoading]      = useState(false);
   const [fetchError,   setFetchError]   = useState<string | null>(null);
   const [cacheStatus,  setCacheStatus]  = useState<string>("");
+
+  // selectedPlace: clicking a card sets this → MapView flies to it
   const [selectedPlace, setSelectedPlace] = useState<EnrichedPlace | null>(null);
   const [shortlist,     setShortlist]     = useState<EnrichedPlace[]>([]);
   const [activeTab,     setActiveTab]     = useState<"all"|"shortlist">("all");
@@ -304,13 +313,18 @@ export default function Home() {
   const userGeoDebounce = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [prefInput,      setPrefInput]      = useState<Record<string, string>>({});
 
-  // Split plan state
-  const [planExplanation, setPlanExplanation] = useState<string>("");
-  const [planLoading,     setPlanLoading]     = useState(false);
+  const [planResult,  setPlanResult]  = useState<PlanResult | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError,   setPlanError]   = useState<string>("");
+
+  const llmCache       = useRef<Map<string, string>>(new Map());
+  const autoExplainRef = useRef<string>("");
+  // Debounce timer for auto-explain — prevents firing during rapid state changes
+  const autoExplainTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const localCache = useRef<Map<string, EnrichedPlace[]>>(new Map());
 
-  // Init "You" user
+  // Init "You" user when location arrives
   useEffect(() => {
     if (!userLocation) return;
     setUsers(prev => {
@@ -352,13 +366,10 @@ export default function Home() {
     return findSplitMatches(allPlaces, users);
   }, [groupMode, allPlaces, users]);
 
-  // Auto-decide: split mode wins if it scores higher than the top group result
   const shouldUseSplit = useMemo(() => {
     if (!groupMode || !splitResults.length || !groupResults.length) return false;
-    // Also require that users have genuinely different preferences
     const allPrefs = users.filter(u => u.location).flatMap(u => u.preferences);
-    const uniquePrefs = new Set(allPrefs);
-    return uniquePrefs.size > 1 && splitResults[0].score > (groupResults[0]?.groupScore ?? 0);
+    return new Set(allPrefs).size > 1 && splitResults[0].score > (groupResults[0]?.groupScore ?? 0);
   }, [groupMode, splitResults, groupResults, users]);
 
   const groupCenter = useMemo((): LatLon | null => {
@@ -370,76 +381,71 @@ export default function Home() {
     users.map(u => ({ id: u.id, label: u.label, location: u.location })),
   [users]);
 
+  // Auto-explain: debounced 800ms so it doesn't fire during rapid user setup changes
+  useEffect(() => {
+    if (!shouldUseSplit || !splitResults.length) return;
+    const top = splitResults[0];
+    const key = `${top.placeA.tags.name}|${top.placeB.tags.name}|${users.filter(u => u.location).map(u => u.preferences.sort().join(",")).join("|")}`;
+    if (autoExplainRef.current === key) return;
+
+    if (autoExplainTimer.current) clearTimeout(autoExplainTimer.current);
+    autoExplainTimer.current = setTimeout(() => {
+      autoExplainRef.current = key;
+      explainPlan(top, true);
+    }, 800);
+
+    return () => {
+      if (autoExplainTimer.current) clearTimeout(autoExplainTimer.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldUseSplit, splitResults.length]);
+
   // ── LLM plan explanation ──────────────────────────────────────────────────
-  async function explainPlan(match: SplitMatch) {
-  console.log("🔥 BUTTON CLICKED");
+  async function explainPlan(match: SplitMatch, auto = false) {
+    if (planLoading) return;
+    const meetupFlow = generateMeetupFlow(match, users);
+    const cacheKey = `${match.placeA.tags.name}|${match.placeB.tags.name}|${users.filter(u => u.location).map(u => u.preferences.sort().join(",")).join("|")}`;
 
-  if (planLoading) {
-    console.log("⛔ Skipped: already loading");
-    return;
-  }
-
-  setPlanLoading(true);
-  setPlanExplanation("");
-
-  try {
-    const activeUsers = users.filter(u => u.location);
-
-    const prompt = `You are a friendly local food guide. A group of ${activeUsers.length} people (${activeUsers.map(u => u.label).join(", ")}) can't agree on one restaurant.
-
-The app found a Smart Plan:
-- Person A goes to: ${match.placeA.tags.name} (${match.placeA.tags.amenity}, ≈₹${match.placeA.estimatedCostForTwo} for two)
-- Person B goes to: ${match.placeB.tags.name} (${match.placeB.tags.amenity}, ≈₹${match.placeB.estimatedCostForTwo} for two)
-- They are only ${Math.round(match.distanceBetween * 1000)}m apart.
-
-Group preferences: ${activeUsers.map(u => `${u.label} likes ${u.preferences.join(", ") || "anything"} (budget ₹${u.maxBudget})`).join("; ")}.
-
-Write a warm, 2-sentence explanation of why this is a great plan. Be conversational and fun. No bullet points.`;
-
-    console.log("📤 Sending prompt:", prompt);
-
-    const res = await fetch("/api/explain", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ prompt }),
-    });
-
-    console.log("📡 Response status:", res.status);
-
-    const data = await res.json();
-
-    console.log("🧠 FULL RESPONSE:", data);
-
-    // 🔥 OPENROUTER RESPONSE FORMAT
-    // Your backend already returns: { text: "..." }
-    let text =
-      data?.text ||                // ✅ expected
-      data?.error ||               // ❌ backend error
-      "Couldn't generate explanation.";
-
-    text = text.trim();
-
-    console.log("🧠 FINAL TEXT:", text);
-
-    // 🛡️ prevent empty UI
-    if (!text) {
-      text = "A smart way for everyone to enjoy their own favorites while staying close together.";
+    if (llmCache.current.has(cacheKey)) {
+      setPlanResult({ text: llmCache.current.get(cacheKey)!, meetupFlow, fairnessSummary: buildFairnessSummary(match) });
+      return;
     }
 
-    setPlanExplanation(text);
+    if (!auto) setPlanLoading(true);
+    setPlanError("");
 
-  } catch (err) {
-    console.error("💥 explainPlan failed:", err);
-
-    setPlanExplanation(
-      "A great way to keep everyone happy — different tastes, same hangout."
-    );
-  } finally {
-    setPlanLoading(false);
+    try {
+      const res = await fetch("/api/explain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: buildExplainPrompt(match, users), cacheKey }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) { setPlanError(data.error ?? "Couldn't generate explanation"); return; }
+      const text = (data.text ?? "").trim();
+      if (!text) { setPlanError("Empty response — try again"); return; }
+      llmCache.current.set(cacheKey, text);
+      setPlanResult({ text, meetupFlow, fairnessSummary: buildFairnessSummary(match) });
+    } catch {
+      setPlanError("Couldn't reach explanation service. Try again.");
+    } finally {
+      setPlanLoading(false);
+    }
   }
-}
+
+  function buildFairnessSummary(match: SplitMatch): string {
+    const active = users.filter(u => u.location);
+    if (!active.length) return "";
+    const pains = active.map(u => {
+      const dest = match.assignment[u.id] === "B" ? match.placeB : match.placeA;
+      return { label: u.label, pain: computeUserPain(dest, u) };
+    });
+    const best = pains.reduce((a, b) => a.pain < b.pain ? a : b);
+    const worst = pains.reduce((a, b) => a.pain > b.pain ? a : b);
+    if (Math.abs(best.pain - worst.pain) < 2) return "Balanced for everyone";
+    return `${best.label} is happiest · ${worst.label} compromises a little`;
+  }
+
   // ── Data fetching ─────────────────────────────────────────────────────────
   const fetchOsmPlaces = useCallback(async (lat: number, lon: number): Promise<RawPlace[]> => {
     const query = `[out:json][timeout:15];\n(\n  node["amenity"="cafe"](around:${radius},${lat},${lon});\n  node["amenity"="restaurant"](around:${radius},${lat},${lon});\n  node["amenity"="fast_food"](around:${radius},${lat},${lon});\n  node["amenity"="bar"](around:${radius},${lat},${lon});\n  way["amenity"="cafe"](around:${radius},${lat},${lon});\n  way["amenity"="restaurant"](around:${radius},${lat},${lon});\n  way["amenity"="fast_food"](around:${radius},${lat},${lon});\n);\nout center 150;\n`;
@@ -502,7 +508,7 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
       }).filter(p => p.distance <= radius / 1000).slice(0, 150);
       localCache.current.set(key, enriched);
       setAllPlaces(enriched); setFetchError(null);
-    } catch { setFetchError("Failed to load places. Please try again."); }
+    } catch { setFetchError("Failed to load places."); }
     finally { setLoading(false); }
   }, [fetchOsmPlaces, fetchMapboxPlaces, radius]);
 
@@ -549,6 +555,7 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
     setUsers(p => p.map(u => u.id === uid ? { ...u, location: { latitude: lat, longitude: lon }, locationLabel: s.place_name } : u));
     setUserGeoQuery(p => ({ ...p, [uid]: s.place_name }));
     setUserGeoSugg(p => ({ ...p, [uid]: [] }));
+    setPlanResult(null); autoExplainRef.current = "";
   }
   async function handleSearch() {
     const q = locationQuery.trim(); if (!q) return;
@@ -573,39 +580,41 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
   }
 
   // ── Group helpers ─────────────────────────────────────────────────────────
-  function addGroupUser() { const id = `u${Date.now()}`; setUsers(p => [...p, { id, label: `Friend ${p.length}`, location: null, locationLabel: "", maxBudget: 700, preferences: [] }]); }
-  function removeGroupUser(id: string) { if (id !== "you") setUsers(p => p.filter(u => u.id !== id)); }
+  function addGroupUser() { const id = `u${Date.now()}`; setUsers(p => [...p, { id, label: `Friend ${p.length}`, location: null, locationLabel: "", maxBudget: 700, preferences: [] }]); setPlanResult(null); autoExplainRef.current = ""; }
+  function removeGroupUser(id: string) { if (id !== "you") { setUsers(p => p.filter(u => u.id !== id)); setPlanResult(null); autoExplainRef.current = ""; } }
   function updateUser(id: string, patch: Partial<GroupUser>) { setUsers(p => p.map(u => u.id === id ? { ...u, ...patch } : u)); }
   function addPref(uid: string, pref: string) {
     const p = pref.trim().toLowerCase(); if (!p) return;
     setUsers(prev => prev.map(u => u.id === uid && !u.preferences.includes(p) ? { ...u, preferences: [...u.preferences, p] } : u));
     setPrefInput(prev => ({ ...prev, [uid]: "" }));
+    setPlanResult(null); autoExplainRef.current = "";
   }
-  function removePref(uid: string, pref: string) { setUsers(p => p.map(u => u.id === uid ? { ...u, preferences: u.preferences.filter(x => x !== pref) } : u)); }
+  function removePref(uid: string, pref: string) { setUsers(p => p.map(u => u.id === uid ? { ...u, preferences: u.preferences.filter(x => x !== pref) } : u)); setPlanResult(null); autoExplainRef.current = ""; }
 
   // ── Shortlist ─────────────────────────────────────────────────────────────
   function placeKey(p: EnrichedPlace) { return `${(p.tags.name||"").toLowerCase().trim()}-${p.tags.amenity}-${p.lat.toFixed(5)}-${p.lon.toFixed(5)}`; }
   function toggleShortlist(place: EnrichedPlace) { const k = placeKey(place); setShortlist(p => p.some(x => placeKey(x) === k) ? p.filter(x => placeKey(x) !== k) : [...p, place]); }
   function isShortlisted(place: EnrichedPlace) { return shortlist.some(p => placeKey(p) === placeKey(place)); }
 
-  // ── Display ───────────────────────────────────────────────────────────────
-  const activeGroupList = groupMode
-    ? (shouldUseSplit ? splitResults : groupResults)
-    : filteredPlaces;
+  // ── Handle card click — select place AND fly map ──────────────────────────
+  function handlePlaceClick(place: EnrichedPlace) {
+    setSelectedPlace(place);
+    // Map flies via the selectedPlace useEffect in MapView
+  }
 
+  const activeGroupList = groupMode ? (shouldUseSplit ? splitResults : groupResults) : filteredPlaces;
   const displayedItems =
     activeTab === "shortlist" ? shortlist :
     groupMode ? (shouldUseSplit ? splitResults : groupResults) :
     filteredPlaces;
-
   const mapPlaces = groupMode ? (shouldUseSplit ? [] : groupResults) : filteredPlaces;
   const mapCenter = groupMode && groupCenter ? groupCenter : userLocation;
-
   const activeUserCount = users.filter(u => u.location).length;
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <main className="h-screen bg-[#0a0a0f] text-white font-sans flex flex-col overflow-hidden">
+
       {/* Header */}
       <header className="flex-none z-20 bg-[#0a0a0f]/95 backdrop-blur border-b border-white/5 px-4 py-2">
         <div className="max-w-screen-xl mx-auto flex flex-col gap-2">
@@ -619,7 +628,7 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
                   onKeyDown={handleKeyDown}
                   className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-xs placeholder:text-white/30 focus:outline-none focus:border-white/30 transition-colors" />
                 {suggestions.length > 0 && (
-                  <div ref={suggestionsRef} className="absolute top-full mt-1 left-0 right-0 z-30 bg-[#141420] border border-white/10 rounded-lg overflow-hidden shadow-xl">
+                  <div ref={suggestionsRef} className="absolute top-full mt-1 left-0 right-0 z-50 bg-[#141420] border border-white/10 rounded-lg overflow-hidden shadow-xl">
                     {suggestions.map((s, i) => (
                       <button key={s.place_name} onMouseDown={e => { e.preventDefault(); selectSuggestion(s); }}
                         className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${i === activeIndex ? "bg-indigo-600/50 text-white" : "hover:bg-white/5 text-white/70"}`}>
@@ -629,20 +638,29 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
                   </div>
                 )}
               </div>
-              <button onClick={handleSearch} disabled={searching} className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-3 rounded-lg text-xs font-medium transition-colors">{searching ? "…" : "Search"}</button>
-              <button onClick={useCurrentLocation} className="bg-white/10 hover:bg-white/15 px-2 rounded-lg text-sm transition-colors">🧭</button>
+              <button onClick={handleSearch} disabled={searching}
+                className="bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 disabled:opacity-50 px-3 rounded-lg text-xs font-medium transition-colors select-none">
+                {searching ? "…" : "Search"}
+              </button>
+              <button onClick={useCurrentLocation}
+                className="bg-white/10 hover:bg-white/15 active:bg-white/20 px-2 rounded-lg text-sm transition-colors">
+                🧭
+              </button>
             </div>
             <div className="flex items-center gap-2 flex-none">
-              <button onClick={() => { setGroupMode(g => !g); if (!groupMode) setShowGroupPanel(true); setPlanExplanation(""); }}
-                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all border ${groupMode ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300" : "bg-white/5 border-white/10 text-white/50 hover:text-white/70"}`}>
+              <button
+                onClick={() => { setGroupMode(g => !g); if (!groupMode) setShowGroupPanel(true); setPlanResult(null); autoExplainRef.current = ""; }}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all border select-none ${groupMode ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300" : "bg-white/5 border-white/10 text-white/50 hover:text-white/70"}`}>
                 {groupMode ? "👥 Group" : "👤 Solo"}
               </button>
               <label className="text-xs text-white/40">Sort</label>
-              <select value={sortBy} onChange={e => setSortBy(e.target.value as typeof sortBy)} className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-white/25">
+              <select value={sortBy} onChange={e => setSortBy(e.target.value as typeof sortBy)}
+                className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-white/25 cursor-pointer">
                 <option value="score">Best Match</option><option value="distance">Nearest</option><option value="price">Cheapest</option>
               </select>
               <label className="text-xs text-white/40">Radius</label>
-              <select value={radius} onChange={e => setRadius(Number(e.target.value))} className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-white/25">
+              <select value={radius} onChange={e => setRadius(Number(e.target.value))}
+                className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-white/25 cursor-pointer">
                 <option value={1000}>1 km</option><option value={2000}>2 km</option><option value={4000}>4 km</option><option value={6000}>6 km</option><option value={10000}>10 km</option>
               </select>
             </div>
@@ -650,36 +668,48 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
           {fetchError && (
             <div className="bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs rounded-lg px-3 py-1.5 flex items-center justify-between">
               <span>{fetchError}</span>
-              <button onClick={() => setFetchError(null)} className="ml-3 text-rose-400/60 hover:text-rose-400">✕</button>
+              <button onClick={() => setFetchError(null)} className="ml-3 text-rose-400/60 hover:text-rose-400 cursor-pointer">✕</button>
             </div>
           )}
         </div>
       </header>
 
+      {/* Body */}
       <div className="flex-1 flex overflow-hidden px-3 py-3 gap-3 max-w-screen-xl mx-auto w-full">
+
         {/* Map */}
         <div className="flex-1 rounded-xl overflow-hidden border border-white/10 min-w-0">
           {mapCenter ? (
-            <MapView places={mapPlaces} userLocation={mapCenter} selectedPlace={selectedPlace} onSelectPlace={setSelectedPlace} groupMode={groupMode} groupUsers={mapGroupUsers} />
+            <MapView
+              places={mapPlaces}
+              userLocation={mapCenter}
+              selectedPlace={selectedPlace}
+              onSelectPlace={handlePlaceClick}
+              groupMode={groupMode}
+              groupUsers={mapGroupUsers}
+            />
           ) : (
             <div className="h-full flex items-center justify-center text-white/20 text-sm">Waiting for location…</div>
           )}
         </div>
 
         <div className="flex gap-2 min-w-0">
-          {/* Group setup panel */}
+
+          {/* Group panel */}
           {groupMode && showGroupPanel && (
             <div className="w-64 flex flex-col gap-2 bg-[#0f0f1a] border border-white/8 rounded-xl p-3 overflow-y-auto">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-white/70">👥 Group Setup</span>
-                <button onClick={() => setShowGroupPanel(false)} className="text-white/30 hover:text-white/60 text-xs">✕</button>
+                <button onClick={() => setShowGroupPanel(false)} className="text-white/30 hover:text-white/60 text-xs cursor-pointer px-1">✕</button>
               </div>
               {users.map(user => (
                 <div key={user.id} className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-2.5 flex flex-col gap-2">
                   <div className="flex items-center justify-between">
                     <input value={user.label} onChange={e => updateUser(user.id, { label: e.target.value })}
                       className="bg-transparent text-xs font-semibold text-white/80 w-24 focus:outline-none border-b border-white/10 focus:border-white/30" />
-                    {user.id !== "you" && <button onClick={() => removeGroupUser(user.id)} className="text-rose-400/50 hover:text-rose-400 text-xs">✕</button>}
+                    {user.id !== "you" && (
+                      <button onClick={() => removeGroupUser(user.id)} className="text-rose-400/50 hover:text-rose-400 text-xs cursor-pointer px-1">✕</button>
+                    )}
                   </div>
                   <div className="relative">
                     <input type="text" placeholder={user.id === "you" ? "Your location" : "Their location…"}
@@ -687,10 +717,10 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
                       onChange={e => { setUserGeoQuery(p => ({ ...p, [user.id]: e.target.value })); fetchUserGeoSuggestions(user.id, e.target.value); }}
                       className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-[10px] placeholder:text-white/20 focus:outline-none focus:border-white/25" />
                     {(userGeoSugg[user.id] ?? []).length > 0 && (
-                      <div className="absolute top-full mt-0.5 left-0 right-0 z-40 bg-[#141420] border border-white/10 rounded-lg overflow-hidden shadow-xl">
+                      <div className="absolute top-full mt-0.5 left-0 right-0 z-50 bg-[#141420] border border-white/10 rounded-lg overflow-hidden shadow-xl">
                         {(userGeoSugg[user.id] ?? []).map(s => (
                           <button key={s.place_name} onMouseDown={e => { e.preventDefault(); selectUserLocation(user.id, s); }}
-                            className="w-full text-left px-2 py-1.5 text-[10px] hover:bg-white/5 text-white/60 truncate">{s.place_name}</button>
+                            className="w-full text-left px-2 py-1.5 text-[10px] hover:bg-white/5 text-white/60 truncate cursor-pointer">{s.place_name}</button>
                         ))}
                       </div>
                     )}
@@ -699,7 +729,7 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
                   <div className="flex items-center gap-1.5">
                     <span className="text-[10px] text-white/30 flex-none">Budget</span>
                     <select value={user.maxBudget} onChange={e => updateUser(user.id, { maxBudget: Number(e.target.value) })}
-                      className="flex-1 bg-white/5 border border-white/10 rounded px-1.5 py-0.5 text-[10px] focus:outline-none">
+                      className="flex-1 bg-white/5 border border-white/10 rounded px-1.5 py-0.5 text-[10px] focus:outline-none cursor-pointer">
                       {BUDGET_OPTIONS.map(b => <option key={b} value={b}>₹{b}</option>)}
                     </select>
                   </div>
@@ -707,7 +737,8 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
                     <div className="flex flex-wrap gap-1 mb-1">
                       {user.preferences.map(p => (
                         <span key={p} className="flex items-center gap-0.5 bg-indigo-600/20 text-indigo-300 text-[9px] px-1.5 py-0.5 rounded-full">
-                          {p}<button onClick={() => removePref(user.id, p)} className="text-indigo-400/60 hover:text-indigo-300 ml-0.5">×</button>
+                          {p}
+                          <button onClick={() => removePref(user.id, p)} className="text-indigo-400/60 hover:text-indigo-300 ml-0.5 cursor-pointer">×</button>
                         </span>
                       ))}
                     </div>
@@ -717,27 +748,35 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
                       className="w-full bg-white/5 border border-white/10 rounded px-1.5 py-0.5 text-[10px] placeholder:text-white/20 focus:outline-none mb-1" />
                     <div className="flex flex-wrap gap-0.5">
                       {PREF_SUGGESTIONS.filter(s => !user.preferences.includes(s)).slice(0, 6).map(s => (
-                        <button key={s} onClick={() => addPref(user.id, s)} className="text-[9px] text-white/30 hover:text-white/60 bg-white/5 px-1.5 py-0.5 rounded-full">+{s}</button>
+                        <button key={s} onClick={() => addPref(user.id, s)}
+                          className="text-[9px] text-white/30 hover:text-white/60 hover:bg-white/10 bg-white/5 px-1.5 py-0.5 rounded-full cursor-pointer transition-colors">+{s}</button>
                       ))}
                     </div>
                   </div>
                 </div>
               ))}
-              <button onClick={addGroupUser} className="w-full py-1.5 border border-dashed border-white/10 rounded-xl text-xs text-white/30 hover:text-white/60 hover:border-white/20 transition-colors">+ Add person</button>
+              <button onClick={addGroupUser}
+                className="w-full py-1.5 border border-dashed border-white/10 rounded-xl text-xs text-white/30 hover:text-white/60 hover:border-white/20 transition-colors cursor-pointer">
+                + Add person
+              </button>
               {groupCenter && <div className="text-[9px] text-white/20 text-center">📍 Searching from group centroid</div>}
             </div>
           )}
           {groupMode && !showGroupPanel && (
-            <button onClick={() => setShowGroupPanel(true)} className="w-8 flex items-center justify-center bg-indigo-600/10 border border-indigo-500/20 rounded-xl text-indigo-400 text-xs hover:bg-indigo-600/20 transition-colors">👥</button>
+            <button onClick={() => setShowGroupPanel(true)}
+              className="w-8 flex items-center justify-center bg-indigo-600/10 border border-indigo-500/20 rounded-xl text-indigo-400 text-xs hover:bg-indigo-600/20 transition-colors cursor-pointer">
+              👥
+            </button>
           )}
 
-          {/* Results list */}
+          {/* Results panel */}
           <div className="w-72 flex flex-col gap-2 min-w-0">
+
             {/* Tabs */}
             <div className="flex gap-1 bg-white/5 rounded-lg p-1 flex-none items-center">
               {(["all","shortlist"] as const).map(tab => (
                 <button key={tab} onClick={() => setActiveTab(tab)}
-                  className={`flex-1 py-1 text-xs rounded-md font-medium transition-colors ${activeTab === tab ? "bg-white/10 text-white" : "text-white/40 hover:text-white/60"}`}>
+                  className={`flex-1 py-1 text-xs rounded-md font-medium transition-colors cursor-pointer select-none ${activeTab === tab ? "bg-white/10 text-white" : "text-white/40 hover:text-white/60"}`}>
                   {tab === "all"
                     ? <>All {!loading && <span className="text-white/30">({(groupMode ? activeGroupList : filteredPlaces).length}{!groupMode && resultsQuery ? `/${places.length}` : ""})</span>}</>
                     : <>⭐ Shortlist {shortlist.length > 0 && <span className="text-indigo-400">({shortlist.length})</span>}</>}
@@ -748,140 +787,199 @@ Write a warm, 2-sentence explanation of why this is a great plan. Be conversatio
               )}
             </div>
 
-            {/* Solo filter */}
+            {/* Filter box */}
             {activeTab === "all" && !groupMode && (
               <div className="relative flex-none">
-                <input type="text" placeholder="Filter results… (e.g. biryani, cafe)" value={resultsQuery} onChange={e => setResultsQuery(e.target.value)}
+                <input type="text" placeholder="Filter results…" value={resultsQuery} onChange={e => setResultsQuery(e.target.value)}
                   className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-xs placeholder:text-white/20 focus:outline-none focus:border-white/25 transition-colors" />
-                {resultsQuery && <button onClick={() => setResultsQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 text-xs">✕</button>}
+                {resultsQuery && (
+                  <button onClick={() => setResultsQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 text-xs cursor-pointer">✕</button>
+                )}
               </div>
             )}
 
-            {/* Group mode status bar */}
+            {/* Group status bar */}
             {groupMode && activeTab === "all" && (
-              <div className={`text-[10px] rounded-lg px-3 py-1.5 flex items-center justify-between ${shouldUseSplit ? "bg-violet-600/10 border border-violet-500/20 text-violet-300/70" : "bg-indigo-600/5 border border-indigo-500/10 text-indigo-300/60"}`}>
-                <span>
-                  {shouldUseSplit
-                    ? `🤝 Smart Plan — ${activeUserCount} people, different tastes`
-                    : `👥 ${activeUserCount} people · fair distance · shared budget`}
-                </span>
+              <div className={`text-[10px] rounded-lg px-3 py-1.5 ${shouldUseSplit ? "bg-violet-600/10 border border-violet-500/20 text-violet-300/70" : "bg-indigo-600/5 border border-indigo-500/10 text-indigo-300/60"}`}>
+                {shouldUseSplit ? `🤝 Smart Plan — ${activeUserCount} people, different tastes` : `👥 ${activeUserCount} people · fair distance · shared budget`}
               </div>
             )}
 
-            {/* Results */}
-            <div className="flex-1 overflow-y-auto space-y-1.5">
+            {/* Results list */}
+            <div className="flex-1 overflow-y-auto space-y-1.5 overscroll-contain">
               {loading ? (
-                [...Array(8)].map((_, i) => <div key={i} className="bg-white/5 rounded-xl h-16 animate-pulse" style={{ animationDelay: `${i * 50}ms` }} />)
+                [...Array(8)].map((_, i) => (
+                  <div key={i} className="bg-white/5 rounded-xl h-16 animate-pulse" style={{ animationDelay: `${i * 50}ms` }} />
+                ))
               ) : displayedItems.length === 0 ? (
                 <div className="text-center py-12 text-white/30 text-xs">
                   {activeTab === "shortlist" ? "No places shortlisted yet." : groupMode ? "Set locations for at least one person." : resultsQuery ? `No results for "${resultsQuery}"` : "No places found. Try increasing the radius."}
                 </div>
               ) : (
                 (displayedItems as any[]).map((item, idx) => {
-                  // ── Split match card ──────────────────────────────────────
+
+                  // ── Split match card ──────────────────────────────────
                   if ("placeA" in item) {
                     const s = item as SplitMatch;
                     const isFirst = idx === 0;
+                    const meetupFlow = isFirst && planResult ? planResult.meetupFlow : generateMeetupFlow(s, users);
+
                     return (
-                      <div key={`split-${idx}`} className="bg-violet-500/5 border border-violet-500/25 rounded-xl p-3">
+                      <div key={`split-${idx}`}
+                        className={`border rounded-xl p-3 ${isFirst ? "bg-violet-500/8 border-violet-500/30" : "bg-white/[0.02] border-white/[0.05]"}`}>
+
                         {/* Header */}
                         <div className="flex items-center justify-between mb-2">
                           <div className="flex items-center gap-1.5">
                             <span className="text-xs">🤝</span>
-                            <span className="text-xs font-semibold text-violet-300">Smart Plan</span>
-                            {isFirst && <span className="text-[9px] bg-violet-600/30 text-violet-200 px-1.5 py-0.5 rounded-full">Best match</span>}
+                            <span className={`text-xs font-semibold ${isFirst ? "text-violet-300" : "text-white/50"}`}>Smart Plan</span>
+                            {isFirst && <span className="text-[9px] bg-violet-600/25 text-violet-200/80 px-1.5 py-0.5 rounded-full">Best</span>}
                           </div>
                           <span className="text-[9px] text-white/30">{Math.round(s.distanceBetween * 1000)}m apart</span>
                         </div>
 
-                        {/* Two places */}
+                        {/* Two places — clickable to fly map */}
                         <div className="space-y-1.5 mb-2">
                           {[s.placeA, s.placeB].map((place, pi) => (
-                            <div key={pi} className="flex items-center gap-2 bg-white/[0.03] rounded-lg px-2 py-1.5">
-                              <span className="text-base flex-shrink-0">{placeEmoji(place)}</span>
+                            <button key={pi}
+                              onClick={() => handlePlaceClick(place)}
+                              className="w-full flex items-center gap-2 bg-white/[0.04] hover:bg-white/[0.07] active:bg-white/[0.10] rounded-lg px-2 py-1.5 transition-colors cursor-pointer text-left">
+                              <span className="text-base flex-shrink-0 leading-none">{placeEmojiFromPlace(place)}</span>
                               <div className="min-w-0 flex-1">
                                 <div className="text-xs font-medium truncate">{place.tags.name}</div>
                                 <div className={`text-[10px] ${priceColor(place.estimatedCostForTwo)}`}>≈ ₹{place.estimatedCostForTwo}</div>
                               </div>
-                            </div>
+                            </button>
                           ))}
                         </div>
 
                         {/* Who goes where */}
                         <div className="flex gap-1 flex-wrap mb-2">
                           {users.filter(u => u.location).map(u => {
-                            const assignment = s.assignment[u.id];
-                            const emoji = assignment === "A" ? placeEmoji(s.placeA) : assignment === "B" ? placeEmoji(s.placeB) : "🔀";
+                            const dest = s.assignment[u.id] === "B" ? s.placeB : s.placeA;
                             return (
-                              <span key={u.id} className="text-[9px] px-1.5 py-0.5 rounded-full bg-white/5 text-white/50 flex items-center gap-0.5">
-                                {u.label} → {emoji}
+                              <span key={u.id} className="text-[9px] px-1.5 py-0.5 rounded-full bg-white/5 text-white/50">
+                                {u.label} → {placeEmojiFromPlace(dest)}
                               </span>
                             );
                           })}
                         </div>
 
-                        {/* Reasons */}
-                        {s.reasons.length > 0 && (
-                          <p className="text-[9px] text-white/30 mb-2 leading-relaxed">{s.reasons[0]}</p>
+                        {/* Meetup flow */}
+                        {isFirst && (
+                          <div className="bg-white/[0.03] border border-white/5 rounded-lg p-2 mb-2 space-y-1">
+                            {meetupFlow.map((step, si) => (
+                              <div key={si} className="text-[10px] text-white/45 leading-relaxed">{step}</div>
+                            ))}
+                          </div>
                         )}
 
-                        {/* LLM explanation */}
+                        {/* Fairness */}
+                        {isFirst && planResult?.fairnessSummary && (
+                          <div className="text-[9px] text-white/30 mb-2 flex items-center gap-1">
+                            <span>⚖️</span><span>{planResult.fairnessSummary}</span>
+                          </div>
+                        )}
+
+                        {/* LLM Explanation — always present */}
                         {isFirst && (
                           <div>
-                            {planExplanation ? (
-                              <p className="text-[10px] text-violet-200/60 leading-relaxed italic">"{planExplanation}"</p>
+                            {planResult?.text ? (
+                              <div className="space-y-1.5">
+                                <p className="text-[10px] text-violet-200/65 leading-relaxed">{planResult.text}</p>
+                                <button
+                                  onClick={() => { setPlanResult(null); autoExplainRef.current = ""; explainPlan(s); }}
+                                  className="text-[9px] text-violet-400/40 hover:text-violet-300/70 transition-colors cursor-pointer">
+                                  ↺ Regenerate
+                                </button>
+                              </div>
+                            ) : planError ? (
+                              <div className="space-y-1.5">
+                                <p className="text-[9px] text-rose-400/60">⚠️ {planError}</p>
+                                <button
+                                  onClick={() => { setPlanError(""); explainPlan(s); }}
+                                  disabled={planLoading}
+                                  className="w-full text-[10px] py-1.5 bg-violet-600/15 hover:bg-violet-600/25 active:bg-violet-600/35 text-violet-300/70 rounded-lg transition-colors disabled:opacity-50 border border-violet-500/15 cursor-pointer">
+                                  {planLoading ? "✨ Thinking…" : "✨ Try again"}
+                                </button>
+                              </div>
                             ) : (
-                              <button onClick={() => explainPlan(s)} disabled={planLoading}
-                                className="w-full text-[10px] py-1 bg-violet-600/15 hover:bg-violet-600/25 text-violet-300/70 rounded-lg transition-colors disabled:opacity-50">
+                              <button
+                                onClick={() => explainPlan(s)}
+                                disabled={planLoading}
+                                className="w-full text-[10px] py-1.5 bg-violet-600/15 hover:bg-violet-600/25 active:bg-violet-600/35 text-violet-300/70 rounded-lg transition-colors disabled:opacity-50 border border-violet-500/15 cursor-pointer select-none">
                                 {planLoading ? "✨ Thinking…" : "✨ Explain this plan"}
                               </button>
                             )}
                           </div>
                         )}
+
+                        {/* Reasons on non-first cards */}
+                        {!isFirst && s.reasons.length > 0 && (
+                          <p className="text-[9px] text-white/25 leading-relaxed mt-1">{s.reasons[0]}</p>
+                        )}
                       </div>
                     );
                   }
 
-                  // ── Regular place card ────────────────────────────────────
+                  // ── Regular / group place card ────────────────────────
                   const place = item as EnrichedPlace | GroupEnrichedPlace;
                   const gp = place as GroupEnrichedPlace;
                   const isGroup = groupMode && "groupScore" in place;
                   const added = isShortlisted(place);
-                  const isSel = selectedPlace && placeKey(selectedPlace) === placeKey(place);
-                  const cuisineDisplay = (place.tags.cuisine ?? "").replace(/food and drink,?\s*/gi,"").replace(/food,?\s*/gi,"").replace(/^,\s*/,"").trim();
+                  const isSel = !!(selectedPlace && placeKey(selectedPlace) === placeKey(place));
+                  const cuisineDisplay = (place.tags.cuisine ?? "")
+                    .replace(/food and drink,?\s*/gi, "").replace(/food,?\s*/gi, "").replace(/^,\s*/, "").trim();
+                  const activeUsersInGroup = users.filter(u => u.location);
 
                   return (
-                    <div key={placeKey(place)} onClick={() => setSelectedPlace(place)}
-                      className={`group relative bg-white/[0.03] hover:bg-white/[0.06] border rounded-xl p-3 cursor-pointer transition-all ${isSel ? "border-indigo-500/60 bg-indigo-500/5" : "border-white/[0.06]"}`}>
+                    <div
+                      key={placeKey(place)}
+                      onClick={() => handlePlaceClick(place)}
+                      className={`relative bg-white/[0.03] hover:bg-white/[0.07] active:bg-white/[0.10] border rounded-xl p-3 cursor-pointer transition-all select-none ${isSel ? "border-indigo-500/60 bg-indigo-500/5" : "border-white/[0.06]"}`}>
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1">
-                            <span className="text-sm leading-none flex-shrink-0">{placeEmoji(place)}</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-sm leading-none flex-shrink-0">{placeEmojiFromPlace(place)}</span>
                             <h2 className="text-xs font-semibold truncate">{place.tags.name}</h2>
                           </div>
                           {cuisineDisplay && <p className="text-[10px] text-white/30 mt-0.5 truncate capitalize">{cuisineDisplay}</p>}
                           {place.tags.address && <p className="text-[10px] text-white/20 mt-0.5 truncate">{place.tags.address}</p>}
                           <div className="flex items-center gap-2 mt-1 text-xs text-white/40 flex-wrap">
-                            {isGroup ? <><span>📏 avg {gp.avgDistanceKm.toFixed(2)} km</span><span className="text-white/20">max {gp.maxDistanceKm.toFixed(2)}</span></> : <span>📏 {place.distance.toFixed(2)} km</span>}
-                            <span className={priceColor(place.estimatedCostForTwo)}>{priceLabel(place.estimatedCostForTwo)} ≈ ₹{place.estimatedCostForTwo}{place.priceSource === "default" && <span className="text-white/20 text-[9px] ml-0.5">est</span>}</span>
+                            {isGroup
+                              ? <><span>📏 avg {gp.avgDistanceKm.toFixed(2)} km</span><span className="text-white/20">max {gp.maxDistanceKm.toFixed(2)}</span></>
+                              : <span>📏 {place.distance.toFixed(2)} km</span>}
+                            <span className={priceColor(place.estimatedCostForTwo)}>
+                              {priceLabel(place.estimatedCostForTwo)} ≈ ₹{place.estimatedCostForTwo}
+                              {place.priceSource === "default" && <span className="text-white/20 text-[9px] ml-0.5">est</span>}
+                            </span>
                           </div>
-                          {isGroup && gp.budgetOk.length > 0 && (
+                          {isGroup && gp.userPain?.length > 0 && (
                             <div className="flex gap-1 mt-1 flex-wrap">
-                              {users.filter(u => u.location).map((u, i) => (
-                                <span key={u.id} className={`text-[9px] px-1.5 py-0.5 rounded-full ${gp.budgetOk[i] ? "bg-emerald-400/10 text-emerald-400/70" : "bg-rose-400/10 text-rose-400/70"}`}>{u.label} {gp.budgetOk[i] ? "✓" : "✗"}</span>
-                              ))}
+                              {activeUsersInGroup.map((u, i) => {
+                                const fl = fairnessLabel(gp.userPain[i] ?? 0);
+                                return (
+                                  <span key={u.id} title={`${u.label}: fairness score`}
+                                    className={`text-[9px] px-1.5 py-0.5 rounded-full bg-white/5 ${fl.color}`}>
+                                    {u.label} {fl.emoji}
+                                  </span>
+                                );
+                              })}
                             </div>
                           )}
                           {isGroup && gp.prefMatches.length > 0 && (
                             <div className="flex flex-wrap gap-1 mt-1">
-                              {gp.prefMatches.map(m => <span key={m} className="text-[9px] bg-indigo-600/15 text-indigo-300/70 px-1.5 py-0.5 rounded-full">{m}</span>)}
+                              {gp.prefMatches.map(m => (
+                                <span key={m} className="text-[9px] bg-indigo-600/15 text-indigo-300/70 px-1.5 py-0.5 rounded-full">{m}</span>
+                              ))}
                             </div>
                           )}
                           {place.tags.opening_hours && <p className="text-[10px] text-white/20 mt-0.5 truncate">🕐 {place.tags.opening_hours}</p>}
                           {place.tags.phone && <p className="text-[10px] text-white/20 mt-0.5">📞 {place.tags.phone}</p>}
                         </div>
-                        <button onClick={e => { e.stopPropagation(); toggleShortlist(place); }}
-                          className={`flex-shrink-0 text-base leading-none transition-transform active:scale-90 ${added ? "text-amber-400" : "text-white/20 hover:text-white/50"}`}>
+                        <button
+                          onClick={e => { e.stopPropagation(); toggleShortlist(place); }}
+                          className={`flex-shrink-0 text-base leading-none transition-transform active:scale-75 cursor-pointer ${added ? "text-amber-400" : "text-white/20 hover:text-white/60"}`}>
                           {added ? "⭐" : "☆"}
                         </button>
                       </div>
