@@ -28,7 +28,9 @@ interface GroupEnrichedPlace extends EnrichedPlace {
   groupScore: number; maxDistanceKm: number; avgDistanceKm: number;
   budgetOk: boolean[]; prefMatches: string[];
   userPain: number[];
+  isPerfectMatch?: boolean; // 🎯 NEW
 }
+
 interface SplitMatch {
   placeA: EnrichedPlace; placeB: EnrichedPlace;
   distanceBetween: number; score: number;
@@ -174,6 +176,53 @@ function scoreForGroup(place: EnrichedPlace, users: GroupUser[]): Omit<GroupEnri
   const groupScore = -avg * 4 - max * 2 - variance * 3 + budgetScore * 15 + prefMatches.length * 10 + (place.estimatedCostForTwo >= 200 && place.estimatedCostForTwo <= 1000 ? 5 : 0);
   return { groupScore, maxDistanceKm: max, avgDistanceKm: avg, budgetOk, prefMatches, userPain };
 }
+// 🎯 NEW: Find places that satisfy ALL users' preferences
+function findPerfectMatches(places: EnrichedPlace[], users: GroupUser[]): GroupEnrichedPlace[] {
+  const active = users.filter(u => u.location);
+  if (active.length < 2) return [];
+  
+  const allPrefs = active.flatMap(u => u.preferences);
+  const uniquePrefs = [...new Set(allPrefs)];
+  
+  // If no one has preferences, no perfect matches needed
+  if (uniquePrefs.length === 0) return [];
+  
+  return places
+    .map(place => {
+      const groupScores = scoreForGroup(place, active);
+      const txt = (place.tags.name + " " + (place.tags.cuisine ?? "") + " " + (place.tags.mapbox_cats ?? "")).toLowerCase();
+      
+      // Check how many users' preferences are satisfied
+      const usersSatisfied = active.filter(u => {
+        if (u.preferences.length === 0) return true; // No pref = satisfied
+        return u.preferences.some(p => txt.includes(p.toLowerCase()));
+      }).length;
+      
+      // Calculate pref coverage score
+      const prefCoverage = usersSatisfied / active.length;
+      const allSatisfied = usersSatisfied === active.length;
+      
+      // Bonus for satisfying everyone
+      const perfectBonus = allSatisfied ? 50 : 0;
+      
+      return {
+        ...place,
+        ...groupScores,
+        groupScore: groupScores.groupScore + (prefCoverage * 30) + perfectBonus,
+      } as GroupEnrichedPlace;
+    })
+    .filter(p => {
+      // Only keep places that satisfy at least 50% of users
+      const txt = (p.tags.name + " " + (p.tags.cuisine ?? "") + " " + (p.tags.mapbox_cats ?? "")).toLowerCase();
+      const satisfied = active.filter(u => {
+        if (u.preferences.length === 0) return true;
+        return u.preferences.some(pref => txt.includes(pref.toLowerCase()));
+      }).length;
+      return satisfied >= Math.ceil(active.length * 0.5);
+    })
+    .sort((a, b) => b.groupScore - a.groupScore)
+    .slice(0, 10);
+}
 
 function findSplitMatches(places: EnrichedPlace[], users: GroupUser[]): SplitMatch[] {
   const active = users.filter(u => u.location);
@@ -294,6 +343,7 @@ const PREF_SUGGESTIONS = ["biryani","cafe","momo","pizza","chinese","south india
 // Add this component OUTSIDE the Home component (at the top of file, after types)
 
 // 🎯 NEW: Separate component for each split plan card
+// 🎯 NEW: Separate component for each split plan card
 function SplitPlanCard({ 
   match, 
   idx, 
@@ -381,6 +431,11 @@ function SplitPlanCard({
     }
   }, [isFirst]);
   
+  // 🎯 Google Maps URL helper
+  const getGoogleMapsUrl = (place: EnrichedPlace): string => {
+    return `https://www.google.com/maps/search/?api=1&query=${place.lat},${place.lon}`;
+  };
+  
   return (
     <div className={`border rounded-xl p-3 transition-all ${
       isFirst 
@@ -411,16 +466,31 @@ function SplitPlanCard({
       {/* Two places */}
       <div className="space-y-1.5 mb-2">
         {[match.placeA, match.placeB].map((place, pi) => (
-          <button key={pi}
-            onClick={() => onPlaceClick(place)}
-            className="w-full flex items-center gap-2 bg-white/[0.04] hover:bg-white/[0.08] active:bg-white/[0.12] rounded-lg px-2 py-1.5 transition-colors cursor-pointer text-left">
-            <span className="text-base flex-shrink-0 leading-none">{placeEmojiFromPlace(place)}</span>
-            <div className="min-w-0 flex-1">
-              <div className="text-xs font-medium truncate">{place.tags.name}</div>
-              <div className={`text-[10px] ${priceColor(place.estimatedCostForTwo)}`}>≈ ₹{place.estimatedCostForTwo}</div>
-            </div>
-            <span className="text-white/20 text-xs">→</span>
-          </button>
+          <div key={pi} className="relative group/place">
+            <button
+              onClick={() => onPlaceClick(place)}
+              className="w-full flex items-center gap-2 bg-white/[0.04] hover:bg-white/[0.08] active:bg-white/[0.12] rounded-lg px-2 py-1.5 pr-8 transition-colors cursor-pointer text-left">
+              <span className="text-base flex-shrink-0 leading-none">{placeEmojiFromPlace(place)}</span>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-medium truncate">{place.tags.name}</div>
+                <div className={`text-[10px] ${priceColor(place.estimatedCostForTwo)}`}>≈ ₹{place.estimatedCostForTwo}</div>
+              </div>
+            </button>
+            
+            {/* 🎯 Google Maps Link for each place */}
+            <a
+              href={getGoogleMapsUrl(place)}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-white/5 hover:bg-blue-500/20 text-white/30 hover:text-blue-400 transition-all flex items-center justify-center opacity-0 group-hover/place:opacity-100"
+              title="Open in Google Maps"
+            >
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+              </svg>
+            </a>
+          </div>
         ))}
       </div>
 
@@ -494,6 +564,43 @@ function SplitPlanCard({
           💡 {match.reasons[0]}
         </p>
       )}
+      
+      {/* 🎯 Bottom Action Bar for Split Plan */}
+      <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-white/5">
+        <div className="flex items-center gap-2">
+          <a
+            href={getGoogleMapsUrl(match.placeA)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-[9px] text-blue-400/50 hover:text-blue-400 transition-colors flex items-center gap-1"
+            title={`Open ${match.placeA.tags.name} in Google Maps`}
+          >
+            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+            </svg>
+            <span className="hidden sm:inline truncate max-w-[80px]">{match.placeA.tags.name.split(" ").slice(0, 2).join(" ")}</span>
+          </a>
+          
+          <a
+            href={getGoogleMapsUrl(match.placeB)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-[9px] text-blue-400/50 hover:text-blue-400 transition-colors flex items-center gap-1"
+            title={`Open ${match.placeB.tags.name} in Google Maps`}
+          >
+            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+            </svg>
+            <span className="hidden sm:inline truncate max-w-[80px]">{match.placeB.tags.name.split(" ").slice(0, 2).join(" ")}</span>
+          </a>
+        </div>
+        
+        <span className="text-[9px] text-white/30">
+          🚶 {match.walkMinutes} min walk
+        </span>
+      </div>
     </div>
   );
 }
@@ -538,6 +645,59 @@ export default function Home() {
   const autoExplainRef = useRef<string>("");
   const autoExplainTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const localCache = useRef<Map<string, EnrichedPlace[]>>(new Map());
+  // 🎯 LLM Explanation state
+const [perfectMatchExplanation, setPerfectMatchExplanation] = useState<Record<string, { text: string; loading: boolean }>>({});
+
+// 🎯 Explain perfect match places
+async function explainPerfectMatch(place: EnrichedPlace, users: GroupUser[]) {
+  const key = placeKey(place);
+  if (perfectMatchExplanation[key]?.text || perfectMatchExplanation[key]?.loading) return;
+  
+  setPerfectMatchExplanation(prev => ({ ...prev, [key]: { text: "", loading: true } }));
+  
+  const prompt = `You are a friendly food guide. In ONE short, warm sentence, explain why ${place.tags.name} is a great choice for this group. Mention what makes it work for everyone. Be specific but brief. Plain text only, no quotes.
+
+Group: ${users.map(u => `${u.label} likes ${u.preferences.join(", ") || "anything"}`).join("; ")}.
+Place: ${place.tags.name} (${place.tags.cuisine || "good food"}, ≈₹${place.estimatedCostForTwo})`;
+
+  try {
+    const res = await fetch("/api/explain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, cacheKey: `perfect-${key}` }),
+    });
+    const data = await res.json();
+    const text = data.text?.trim() || `${place.tags.name} has something for everyone!`;
+    setPerfectMatchExplanation(prev => ({ ...prev, [key]: { text, loading: false } }));
+  } catch {
+    setPerfectMatchExplanation(prev => ({ ...prev, [key]: { text: "A great spot that satisfies the whole group!", loading: false } }));
+  }
+}
+
+// 🎯 Explain regular group places
+async function explainGroupPlace(place: EnrichedPlace, users: GroupUser[]) {
+  const key = placeKey(place);
+  if (perfectMatchExplanation[key]?.text || perfectMatchExplanation[key]?.loading) return;
+  
+  setPerfectMatchExplanation(prev => ({ ...prev, [key]: { text: "", loading: true } }));
+  
+  const prompt = `In ONE short sentence, give a quick tip about ${place.tags.name} for this group. Plain text only.
+
+Group: ${users.map(u => `${u.label}: ${u.preferences.join(",") || "no pref"}`).join("; ")}`;
+
+  try {
+    const res = await fetch("/api/explain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, cacheKey: `group-${key}` }),
+    });
+    const data = await res.json();
+    const text = data.text?.trim() || `Check out ${place.tags.name}!`;
+    setPerfectMatchExplanation(prev => ({ ...prev, [key]: { text, loading: false } }));
+  } catch {
+    setPerfectMatchExplanation(prev => ({ ...prev, [key]: { text: "Worth checking out!", loading: false } }));
+  }
+}
 
   // 🎯 FIX: Ensure "You" always has location when userLocation changes
   useEffect(() => {
@@ -580,12 +740,29 @@ export default function Home() {
   }, [places, resultsQuery]);
 
   const groupResults = useMemo((): GroupEnrichedPlace[] => {
-    if (!groupMode) return [];
-    const active = users.filter(u => u.location !== null);
-    if (!active.length) return [];
-    return allPlaces.map(p => ({ ...p, ...scoreForGroup(p, active) }))
-      .sort((a, b) => b.groupScore - a.groupScore).slice(0, 50);
-  }, [groupMode, users, allPlaces]);
+  if (!groupMode) return [];
+  const active = users.filter(u => u.location !== null);
+  if (!active.length) return [];
+  
+  // 🎯 First check for perfect matches
+  const perfectMatches = findPerfectMatches(allPlaces, active);
+  
+  // If we have perfect matches, prioritize them
+  if (perfectMatches.length > 0 && perfectMatches[0].groupScore > 0) {
+    // Mark perfect matches with a flag
+    const marked = perfectMatches.map(p => ({ ...p, isPerfectMatch: true }));
+    const regular = allPlaces
+      .map(p => ({ ...p, ...scoreForGroup(p, active), isPerfectMatch: false }))
+      .sort((a, b) => b.groupScore - a.groupScore)
+      .slice(0, 50);
+    
+    // Combine: perfect matches first, then regular
+    return [...marked, ...regular.filter(r => !marked.some(m => placeKey(m as any) === placeKey(r as any)))].slice(0, 50);
+  }
+  
+  return allPlaces.map(p => ({ ...p, ...scoreForGroup(p, active), isPerfectMatch: false }))
+    .sort((a, b) => b.groupScore - a.groupScore).slice(0, 50);
+}, [groupMode, users, allPlaces]);
 
   const splitResults = useMemo((): SplitMatch[] => {
     if (!groupMode) return [];
@@ -947,7 +1124,19 @@ const mapGroupUsers = useMemo(() => {
   function handlePlaceClick(place: EnrichedPlace) {
     setSelectedPlace(place);
   }
-
+// 🎯 Generate Google Maps URL (no API key required)
+function getGoogleMapsUrl(place: EnrichedPlace): string {
+  const name = encodeURIComponent(place.tags.name || "");
+  const lat = place.lat;
+  const lon = place.lon;
+  
+  // Format: https://www.google.com/maps/search/?api=1&query=lat,lon
+  // This opens Google Maps centered on the location with a pin
+  return `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
+  
+  // Alternative with place name (shows search results):
+  // return `https://www.google.com/maps/search/?api=1&query=${name}+near+${lat},${lon}`;
+}
   const activeGroupList = groupMode ? (shouldUseSplit ? splitResults : groupResults) : filteredPlaces;
   const displayedItems = activeTab === "shortlist" ? shortlist : (groupMode ? (shouldUseSplit ? splitResults : groupResults) : filteredPlaces);
   const mapPlaces = groupMode ? (shouldUseSplit ? [] : groupResults) : filteredPlaces;
@@ -1051,6 +1240,7 @@ const mapGroupUsers = useMemo(() => {
             <div className="h-full flex items-center justify-center text-white/20 text-sm">Waiting for location…</div>
           )}
         </div>
+        
 
         <div className="flex gap-2 min-w-0">
 
@@ -1329,7 +1519,18 @@ if ("placeA" in item) {
     />
   );
 }
-                  // ── Regular / group place card ────────────────────────
+                 /// ─── Google Maps URL Helper (add this at the top with other helpers) ───
+
+
+// ── Regular / group place card ────────────────────────
+                  // ─── Google Maps URL Helper (add this at the top with other helpers) ───
+function getGoogleMapsUrl(place: EnrichedPlace): string {
+  const lat = place.lat;
+  const lon = place.lon;
+  return `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
+}
+
+// ── Regular / group place card ────────────────────────
                   const place = item as EnrichedPlace | GroupEnrichedPlace;
                   const gp = place as GroupEnrichedPlace;
                   const isGroup = groupMode && "groupScore" in place;
@@ -1338,22 +1539,80 @@ if ("placeA" in item) {
                   const cuisineDisplay = (place.tags.cuisine ?? "")
                     .replace(/food and drink,?\s*/gi, "").replace(/food,?\s*/gi, "").replace(/^,\s*/, "").trim();
                   const activeUsersInGroup = users.filter(u => u.location);
+                  const placeKeyValue = placeKey(place);
+                  
+                  // 🎯 Calculate satisfaction for this place
+                  const satisfactionStats = (() => {
+                    if (!isGroup) return null;
+                    const txt = (place.tags.name + " " + (place.tags.cuisine ?? "") + " " + (place.tags.mapbox_cats ?? "")).toLowerCase();
+                    const satisfied = activeUsersInGroup.filter(u => {
+                      if (u.preferences.length === 0) return true;
+                      return u.preferences.some(p => txt.includes(p.toLowerCase()));
+                    });
+                    return {
+                      count: satisfied.length,
+                      total: activeUsersInGroup.length,
+                      allSatisfied: satisfied.length === activeUsersInGroup.length && activeUsersInGroup.length >= 2,
+                      satisfiedUsers: satisfied,
+                    };
+                  })();
+
+                  // 🎯 Get LLM explanation for this place
+                  const explanation = perfectMatchExplanation[placeKeyValue];
+                  const isExplanationLoading = explanation?.loading || false;
+                  const explanationText = explanation?.text || "";
 
                   return (
                     <div
-                      key={placeKey(place)}
+                      key={placeKeyValue}
                       onClick={() => handlePlaceClick(place)}
                       className={`relative bg-white/[0.03] hover:bg-white/[0.07] active:bg-white/[0.10] border rounded-xl p-3 cursor-pointer transition-all select-none ${
                         isSel ? "border-indigo-500/60 bg-indigo-500/5 shadow-lg shadow-indigo-500/10" : "border-white/[0.06]"
-                      }`}>
-                      <div className="flex items-start justify-between gap-2">
+                      } ${(gp.isPerfectMatch && isGroup) ? "ring-1 ring-amber-500/30" : ""}`}>
+                      
+                      {/* 🎯 Perfect Match Glow Effect */}
+                      {(gp.isPerfectMatch && isGroup) && (
+                        <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-amber-500/5 to-orange-500/5 pointer-events-none" />
+                      )}
+                      
+                      <div className="flex items-start justify-between gap-2 relative">
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
+                          {/* Header Row: Emoji + Name + Badges + Google Maps */}
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-sm leading-none flex-shrink-0">{placeEmojiFromPlace(place)}</span>
                             <h2 className="text-xs font-semibold truncate">{place.tags.name}</h2>
+                            
+                            {/* 🎯 Perfect Match Badge */}
+                            {(gp.isPerfectMatch && isGroup) && (
+                              <span className="text-[9px] bg-gradient-to-r from-amber-500 to-orange-500 text-white px-1.5 py-0.5 rounded-full flex items-center gap-0.5 flex-shrink-0 shadow-sm shadow-amber-500/20">
+                                🎯 Perfect Match
+                              </span>
+                            )}
+                            
+                            {/* 🎯 Google Maps Link - Compact Icon */}
+                            <a
+                              href={getGoogleMapsUrl(place)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="ml-auto flex-shrink-0 w-5 h-5 rounded-full bg-white/5 hover:bg-blue-500/20 text-white/30 hover:text-blue-400 transition-all flex items-center justify-center group/maps"
+                              title="Open in Google Maps"
+                            >
+                              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                              </svg>
+                            </a>
                           </div>
+                          
+                          {/* Cuisine & Address */}
                           {cuisineDisplay && <p className="text-[10px] text-white/30 mt-0.5 truncate capitalize">{cuisineDisplay}</p>}
-                          {place.tags.address && <p className="text-[10px] text-white/20 mt-0.5 truncate">{place.tags.address}</p>}
+                          {place.tags.address && (
+                            <div className="flex items-center gap-1">
+                              <p className="text-[10px] text-white/20 mt-0.5 truncate">{place.tags.address}</p>
+                            </div>
+                          )}
+                          
+                          {/* Distance & Price Row */}
                           <div className="flex items-center gap-2 mt-1 text-xs text-white/40 flex-wrap">
                             {isGroup
                               ? <><span>📏 avg {gp.avgDistanceKm.toFixed(2)} km</span><span className="text-white/20">max {gp.maxDistanceKm.toFixed(2)}</span></>
@@ -1361,9 +1620,54 @@ if ("placeA" in item) {
                             <span className={priceColor(place.estimatedCostForTwo)}>
                               {priceLabel(place.estimatedCostForTwo)} ≈ ₹{place.estimatedCostForTwo}
                             </span>
+                            
+                            {/* 🎯 Quick Action: Directions hint */}
+                            <span className="text-[9px] text-white/20 hidden group-hover/maps:inline transition-opacity">
+                              Click 📍 for directions
+                            </span>
                           </div>
+                          
+                          {/* 🎯 Satisfaction Summary for Group */}
+                          {isGroup && satisfactionStats && (
+                            <div className="flex items-center gap-2 mt-1.5">
+                              <div className="flex items-center gap-1">
+                                <div className="flex -space-x-1">
+                                  {activeUsersInGroup.map((u, i) => {
+                                    const txt = (place.tags.name + " " + (place.tags.cuisine ?? "")).toLowerCase();
+                                    const isSatisfied = u.preferences.length === 0 || u.preferences.some(p => txt.includes(p.toLowerCase()));
+                                    const colors = ["#6366f1", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6"];
+                                    return (
+                                      <div
+                                        key={u.id}
+                                        className={`w-4 h-4 rounded-full border transition-all ${
+                                          isSatisfied ? 'border-white/30' : 'border-white/10'
+                                        } flex items-center justify-center text-[8px] font-medium`}
+                                        style={{ 
+                                          backgroundColor: isSatisfied ? colors[i % colors.length] : '#3a3a4a',
+                                          opacity: isSatisfied ? 1 : 0.6 
+                                        }}
+                                        title={`${u.label}: ${isSatisfied ? '✓ Satisfied' : '✗ Not preferred'}`}
+                                      >
+                                        {i + 1}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                <span className="text-[9px] text-white/40">
+                                  {satisfactionStats.count}/{satisfactionStats.total}
+                                </span>
+                              </div>
+                              {satisfactionStats.allSatisfied && (
+                                <span className="text-[9px] bg-emerald-600/20 text-emerald-300/80 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
+                                  ✓ Everyone's happy!
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          
+                          {/* Fairness Scores */}
                           {isGroup && gp.userPain?.length > 0 && (
-                            <div className="flex gap-1 mt-1 flex-wrap">
+                            <div className="flex gap-1 mt-1.5 flex-wrap">
                               {activeUsersInGroup.map((u, i) => {
                                 const fl = fairnessLabel(gp.userPain[i] ?? 0);
                                 const colorIdx = i % 5;
@@ -1380,6 +1684,8 @@ if ("placeA" in item) {
                               })}
                             </div>
                           )}
+                          
+                          {/* Preference Matches */}
                           {isGroup && gp.prefMatches.length > 0 && (
                             <div className="flex flex-wrap gap-1 mt-1">
                               {gp.prefMatches.map(m => (
@@ -1387,14 +1693,137 @@ if ("placeA" in item) {
                               ))}
                             </div>
                           )}
+                          
+                          {/* 🎯 Extra Info Row: Opening Hours & Phone */}
+                          {(place.tags.opening_hours || place.tags.phone) && (
+                            <div className="flex items-center gap-3 mt-1.5 text-[9px] text-white/25">
+                              {place.tags.opening_hours && (
+                                <span className="truncate">🕐 {place.tags.opening_hours}</span>
+                              )}
+                              {place.tags.phone && (
+                                <span className="truncate">📞 {place.tags.phone}</span>
+                              )}
+                            </div>
+                          )}
                         </div>
+                        
+                        {/* Shortlist Button */}
                         <button
                           onClick={e => { e.stopPropagation(); toggleShortlist(place); }}
                           className={`flex-shrink-0 text-base leading-none transition-transform active:scale-75 cursor-pointer ${
-                            added ? "text-amber-400" : "text-white/20 hover:text-white/60"
+                            added ? "text-amber-400 hover:text-amber-300" : "text-white/20 hover:text-white/60"
                           }`}>
                           {added ? "⭐" : "☆"}
                         </button>
+                      </div>
+                      
+                      {/* 🎯 LLM Explanation Display */}
+                      {isGroup && explanationText && (
+                        <div className="mt-2 p-2 rounded-lg bg-gradient-to-r from-violet-500/5 to-indigo-500/5 border border-violet-500/15">
+                          <div className="flex items-start gap-1.5">
+                            <span className="text-violet-400 text-[10px] mt-0.5">✨</span>
+                            <p className="text-[10px] text-violet-200/70 leading-relaxed italic">
+                              {explanationText}
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* 🎯 LLM Loading State */}
+                      {isGroup && isExplanationLoading && (
+                        <div className="mt-2 p-2 rounded-lg bg-violet-500/5 border border-violet-500/15">
+                          <div className="flex items-center gap-2">
+                            <span className="text-violet-400 text-[10px]">✨</span>
+                            <div className="flex gap-1">
+                              <span className="w-1.5 h-1.5 bg-violet-400/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                              <span className="w-1.5 h-1.5 bg-violet-400/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                              <span className="w-1.5 h-1.5 bg-violet-400/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                            </div>
+                            <span className="text-[9px] text-violet-300/50">Thinking...</span>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* 🎯 Bottom Action Bar */}
+                      <div className="flex items-center justify-between gap-2 mt-2 pt-1.5 border-t border-white/5">
+                        {/* Left - Google Maps */}
+                        <a
+                          href={getGoogleMapsUrl(place)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-[9px] text-blue-400/50 hover:text-blue-400 transition-colors flex items-center gap-1 group"
+                        >
+                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                          </svg>
+                          <span className="hidden sm:inline">Google Maps</span>
+                          <svg className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <path d="M7 17L17 7M17 7H7M17 7V17"/>
+                          </svg>
+                        </a>
+                        
+                        {/* Right - Actions */}
+                        <div className="flex items-center gap-2">
+                          {/* Fly to Map */}
+                          <button
+                            onClick={e => { e.stopPropagation(); handlePlaceClick(place); }}
+                            className="text-[9px] text-white/40 hover:text-white/70 transition-colors flex items-center gap-1"
+                            title="Center map on this location"
+                          >
+                            <span>📍</span>
+                            <span className="hidden sm:inline">Fly to map</span>
+                          </button>
+                          
+                          {/* 🎯 LLM Explanation Button - Perfect Match */}
+                          {isGroup && satisfactionStats?.allSatisfied && !explanationText && !isExplanationLoading && (
+                            <button
+                              onClick={e => { 
+                                e.stopPropagation(); 
+                                explainPerfectMatch(place, activeUsersInGroup);
+                              }}
+                              className="text-[9px] text-violet-400/60 hover:text-violet-400 transition-colors flex items-center gap-1"
+                              title="Get AI explanation"
+                            >
+                              <span>✨</span>
+                              <span className="hidden sm:inline">Why this works</span>
+                            </button>
+                          )}
+                          
+                          {/* 🎯 LLM Explanation Button - Regular Group Place */}
+                          {isGroup && !satisfactionStats?.allSatisfied && !explanationText && !isExplanationLoading && (
+                            <button
+                              onClick={e => { 
+                                e.stopPropagation(); 
+                                explainGroupPlace(place, activeUsersInGroup);
+                              }}
+                              className="text-[9px] text-indigo-400/50 hover:text-indigo-400 transition-colors flex items-center gap-1"
+                              title="Get AI suggestion"
+                            >
+                              <span>💡</span>
+                              <span className="hidden sm:inline">Suggestion</span>
+                            </button>
+                          )}
+                          
+                          {/* 🎯 Regenerate button when explanation exists */}
+                          {isGroup && explanationText && (
+                            <button
+                              onClick={e => { 
+                                e.stopPropagation();
+                                if (satisfactionStats?.allSatisfied) {
+                                  explainPerfectMatch(place, activeUsersInGroup);
+                                } else {
+                                  explainGroupPlace(place, activeUsersInGroup);
+                                }
+                              }}
+                              className="text-[9px] text-violet-400/40 hover:text-violet-400 transition-colors flex items-center gap-1"
+                              title="Regenerate explanation"
+                            >
+                              <span>🔄</span>
+                              <span className="hidden sm:inline">Regenerate</span>
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
