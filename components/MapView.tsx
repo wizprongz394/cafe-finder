@@ -6,8 +6,13 @@ import "mapbox-gl/dist/mapbox-gl.css";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
 
+// 🎨 Cafe Theme Colors
 export const GROUP_COLORS = [
-  "#6366f1", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#f97316",
+  "#C08552", // caramel
+  "#5E3023", // brownie
+  "#895737", // coffee
+  "#3E000C", // chocolate
+  "#8B5E3C", // warm brown
 ];
 
 export type GroupUser = {
@@ -31,16 +36,38 @@ const getPlaceId = (place: any) =>
 const esc = (s: string) =>
   (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 
+// 🎨 Themed popup HTML
 const popupHTML = (place: any) => {
   const cost = place.estimatedCostForTwo || 600;
-  const col = cost <= 400 ? "#10b981" : cost <= 900 ? "#f59e0b" : "#ef4444";
-  const sym = cost <= 400 ? "₹" : cost <= 700 ? "₹₹" : cost <= 1200 ? "₹₹₹" : "₹₹₹₹";
+  const col = cost <= 400 ? "#4a7c59" : cost <= 900 ? "#C08552" : "#9e3a3a";
+  const sym = cost <= 300 ? "₹" : cost <= 700 ? "₹₹" : cost <= 1200 ? "₹₹₹" : "₹₹₹₹";
   const cuisine = (place.tags?.cuisine || "").replace(/food and drink,?\s*/gi,"").replace(/food,?\s*/gi,"").trim();
-  return `<div style="font-family:system-ui,sans-serif;padding:10px 8px;min-width:180px">
-    <div style="font-weight:700;font-size:14px;color:#111;margin-bottom:4px">${esc(place.tags?.name||"Unnamed")}</div>
-    ${cuisine?`<div style="font-size:11px;color:#666;margin-bottom:4px">${esc(cuisine)}</div>`:""}
-    <div style="font-size:14px;font-weight:700;color:${col}">${sym} ≈ ₹${cost} <span style="font-size:11px;color:#888;font-weight:400">· ${(place.distance||0).toFixed(2)} km</span></div>
-    ${place.tags?.address?`<div style="font-size:10px;color:#999;margin-top:5px;border-top:1px solid #eee;padding-top:5px">${esc(place.tags.address)}</div>`:""}
+  
+  // Get emoji based on place
+  const name = (place.tags?.name || "").toLowerCase();
+  let emoji = "🍽️";
+  if (/momo/.test(name)) emoji = "🥟";
+  else if (/biryani/.test(name)) emoji = "🍚";
+  else if (/pizza/.test(name)) emoji = "🍕";
+  else if (/burger/.test(name)) emoji = "🍔";
+  else if (/cake|bakery/.test(name)) emoji = "🥐";
+  else if (/tea|chai/.test(name)) emoji = "🍵";
+  else if (/coffee|cafe/.test(name)) emoji = "☕";
+  else if (/chinese|noodle/.test(name)) emoji = "🍜";
+  else if (place.tags?.amenity === "cafe") emoji = "☕";
+  else if (place.tags?.amenity === "fast_food") emoji = "🍔";
+  
+  return `<div style="font-family:'DM Sans',system-ui,sans-serif;padding:12px 10px;min-width:200px;background:#FFECD1;border-radius:12px;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+      <span style="font-size:20px;">${emoji}</span>
+      <span style="font-weight:600;font-size:14px;color:#3E000C;">${esc(place.tags?.name||"Unnamed")}</span>
+    </div>
+    ${cuisine?`<div style="font-size:11px;color:#895737;margin-bottom:6px;text-transform:capitalize;">${esc(cuisine)}</div>`:""}
+    <div style="display:flex;align-items:center;gap:12px;">
+      <span style="font-size:14px;font-weight:600;color:${col};">${sym} ≈ ₹${cost}</span>
+      <span style="font-size:11px;color:#895737;">📍 ${(place.distance||0).toFixed(2)} km</span>
+    </div>
+    ${place.tags?.address?`<div style="font-size:10px;color:#895737;margin-top:8px;padding-top:8px;border-top:1px solid rgba(192,133,82,0.25);">${esc(place.tags.address)}</div>`:""}
   </div>`;
 };
 
@@ -50,14 +77,12 @@ export default function MapView({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef       = useRef<mapboxgl.Map | null>(null);
-  // overlay div that sits on top of the map canvas — we position user markers inside it
   const overlayRef   = useRef<HTMLDivElement | null>(null);
 
   const mapLoadedRef    = useRef(false);
   const sourcesReadyRef = useRef(false);
   const firstFlyRef     = useRef(false);
 
-  // Always-current refs — updated during render (before effects)
   const onSelectRef     = useRef(onSelectPlace);
   const userLocRef      = useRef(userLocation);
   const groupUsersRef   = useRef(groupUsers);
@@ -70,7 +95,7 @@ export default function MapView({
 
   const placeIds = useMemo(() => new Map(places.map(p => [getPlaceId(p), p])), [places]);
 
-  // ── Build one user-pin DOM node ────────────────────────────────────────
+  // 🎨 Themed user pin with cafe colors
   const makePin = (color: string, label: string, isYou: boolean) => {
     const wrap = document.createElement("div");
     wrap.style.cssText = `
@@ -84,8 +109,9 @@ export default function MapView({
     const circle = document.createElement("div");
     circle.style.cssText = `
       width:44px;height:44px;border-radius:50%;
-      background:${color};border:3px solid #fff;
-      box-shadow:0 0 0 3px ${color}55, 0 4px 14px rgba(0,0,0,0.55);
+      background:${color};
+      border:3px solid #FFECD1;
+      box-shadow:0 0 0 3px ${color}40, 0 4px 16px rgba(62,0,12,0.4);
       display:flex;align-items:center;justify-content:center;
       font-size:22px;line-height:1;
     `;
@@ -93,12 +119,14 @@ export default function MapView({
 
     const pill = document.createElement("div");
     pill.style.cssText = `
-      background:${color};color:#fff;
-      font-size:11px;font-weight:700;font-family:system-ui,sans-serif;
-      padding:3px 10px;border-radius:20px;
-      border:1.5px solid rgba(255,255,255,0.35);
-      box-shadow:0 2px 8px rgba(0,0,0,0.3);
+      background:${color};
+      color:#FFECD1;
+      font-size:11px;font-weight:600;font-family:'DM Sans',system-ui,sans-serif;
+      padding:4px 10px;border-radius:20px;
+      border:1.5px solid rgba(255,236,209,0.35);
+      box-shadow:0 2px 8px rgba(62,0,12,0.3);
       white-space:nowrap;
+      letter-spacing:0.03em;
     `;
     pill.textContent = label;
 
@@ -107,13 +135,11 @@ export default function MapView({
     return wrap;
   };
 
-  // ── Position all user pins using map.project() ─────────────────────────
   const renderUserOverlay = () => {
     const map = mapRef.current;
     const overlay = overlayRef.current;
     if (!map || !overlay || !mapLoadedRef.current) return;
 
-    // wipe previous pins
     overlay.innerHTML = "";
 
     const loc     = userLocRef.current;
@@ -121,7 +147,6 @@ export default function MapView({
     const grpUsers = groupUsersRef.current;
 
     const toPlace = (latitude: number, longitude: number, color: string, label: string, isYou: boolean) => {
-      // project geographic coords → pixel coords relative to map container
       const { x, y } = map.project([longitude, latitude]);
       const pin = makePin(color, label, isYou);
       pin.style.left = `${x}px`;
@@ -139,11 +164,19 @@ export default function MapView({
     }
   };
 
-  // ── Init map ONCE ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current || !userLocation || mapRef.current) return;
 
-    // Create the transparent overlay div that lives above the canvas
+    // ✅ FIX: Create map first (container must be empty)
+    const map = new mapboxgl.Map({
+      container: containerRef.current,
+      style: "mapbox://styles/mapbox/streets-v12",
+      center: [userLocation.longitude, userLocation.latitude],
+      zoom: 14,
+    });
+    mapRef.current = map;
+
+    // ✅ FIX: Add overlay AFTER map canvas is created
     const overlay = document.createElement("div");
     overlay.style.cssText = `
       position:absolute;inset:0;
@@ -153,14 +186,6 @@ export default function MapView({
     `;
     containerRef.current.appendChild(overlay);
     overlayRef.current = overlay;
-
-    const map = new mapboxgl.Map({
-      container: containerRef.current,
-      style: "mapbox://styles/mapbox/dark-v11",
-      center: [userLocation.longitude, userLocation.latitude],
-      zoom: 14,
-    });
-    mapRef.current = map;
 
     map.addControl(new mapboxgl.NavigationControl(), "top-right");
     map.addControl(
@@ -177,28 +202,37 @@ export default function MapView({
         cluster: true, clusterMaxZoom: 14, clusterRadius: 50,
       });
 
+      // 🎨 Themed cluster colors
       map.addLayer({
         id: "clusters", type: "circle", source: "places",
         filter: ["has", "point_count"],
         paint: {
-          "circle-color": ["step",["get","point_count"],"#6366f1",10,"#8b5cf6",30,"#a855f7"],
+          "circle-color": ["step",["get","point_count"],"#C08552",10,"#895737",30,"#5E3023"],
           "circle-radius": ["step",["get","point_count"],20,10,30,30,40],
-          "circle-stroke-width": 3, "circle-stroke-color": "#fff",
+          "circle-stroke-width": 3, 
+          "circle-stroke-color": "#FFECD1",
         },
       });
       map.addLayer({
         id: "cluster-count", type: "symbol", source: "places",
         filter: ["has","point_count"],
         layout: { "text-field": "{point_count_abbreviated}", "text-size": 13 },
-        paint: { "text-color": "#fff" },
+        paint: { "text-color": "#FFECD1" },
       });
+      
+      // 🎨 Themed point colors (green/caramel/red)
       map.addLayer({
         id: "unclustered-point", type: "circle", source: "places",
         filter: ["!",["has","point_count"]],
         paint: {
-          "circle-color": ["case",["<="  ,["get","cost"],400],"#10b981",["<=",["get","cost"],900],"#f59e0b","#ef4444"],
+          "circle-color": ["case",
+            ["<=",["get","cost"],400],"#4a7c59",
+            ["<=",["get","cost"],900],"#C08552",
+            "#9e3a3a"
+          ],
           "circle-radius": 7,
-          "circle-stroke-width": 2, "circle-stroke-color": "#fff",
+          "circle-stroke-width": 2, 
+          "circle-stroke-color": "#FFECD1",
         },
       });
 
@@ -225,31 +259,35 @@ export default function MapView({
       });
 
       sourcesReadyRef.current = true;
+      
+      // ✅ FIX: Render user overlay after map is fully loaded
+      setTimeout(() => renderUserOverlay(), 50);
     });
 
-    // Re-project pins whenever the map moves / zooms / rotates
     const reproject = () => renderUserOverlay();
     map.on("move",   reproject);
     map.on("zoom",   reproject);
     map.on("rotate", reproject);
     map.on("pitch",  reproject);
 
-    // Initial render — fire after first idle so project() is accurate
     map.once("idle", () => renderUserOverlay());
 
     return () => {
-      overlay.remove();
-      overlayRef.current = null;
-      map.remove();
-      mapRef.current = null;
+      // ✅ FIX: Clean up overlay properly
+      if (overlayRef.current) {
+        overlayRef.current.remove();
+        overlayRef.current = null;
+      }
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
       mapLoadedRef.current = false;
       sourcesReadyRef.current = false;
       firstFlyRef.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!userLocation]);
 
-  // ── Update place dots ──────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !sourcesReadyRef.current) return;
@@ -265,18 +303,14 @@ export default function MapView({
     });
   }, [places]);
 
-  // ── Re-render user pins when location / group changes ─────────────────
   useEffect(() => {
     renderUserOverlay();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     userLocation?.latitude, userLocation?.longitude,
     groupMode,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     JSON.stringify(groupUsers.map(u=>({ id:u.id, lat:u.location?.latitude, lon:u.location?.longitude }))),
   ]);
 
-  // ── Fly to selected place ──────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !selectedPlace || !mapLoadedRef.current) return;
@@ -287,7 +321,6 @@ export default function MapView({
       .addTo(map);
   }, [selectedPlace]);
 
-  // ── Fly when userLocation changes ─────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !userLocation || !mapLoadedRef.current) return;
