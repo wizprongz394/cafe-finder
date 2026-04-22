@@ -587,8 +587,25 @@ export default function MainApp() {
     if(isMobile) setMobileSheet("map"); // switch to map view on mobile when a place is tapped
   }
 
-  const selStyle={background:"rgba(243,233,220,0.85)",border:"1px solid rgba(192,133,82,0.28)",borderRadius:"9px",padding:"0 26px 0 10px",fontFamily:"'DM Sans',sans-serif",fontSize:"11px",fontWeight:300 as const,color:T.chocolate,outline:"none",cursor:"pointer",appearance:"none" as const,backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23895737'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat" as const,backgroundPosition:"right 8px center",height:"34px"};
-
+const selStyle: React.CSSProperties = {
+  background: "rgba(243,233,220,0.85)",
+  border: "1px solid rgba(192,133,82,0.28)",
+  borderRadius: "9px",
+  padding: "0 26px 0 10px",
+  fontFamily: "'DM Sans', sans-serif",
+  fontSize: "11px",
+  fontWeight: 300,
+  color: T.chocolate,
+  outline: "none",
+  cursor: "pointer",
+  WebkitAppearance: "none",
+  MozAppearance: "none",
+  appearance: "none" as const,
+  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23895737'/%3E%3C/svg%3E")`,
+  backgroundRepeat: "no-repeat",
+  backgroundPosition: "right 8px center",
+  height: "34px"
+};
   // ── Group panel (shared between desktop sidebar and mobile sheet) ──
   const GroupPanelContent = (
     <div className="xscroll" style={{flex:1,overflowY:"auto",padding:"12px",display:"flex",flexDirection:"column" as const,gap:"8px"}}>
