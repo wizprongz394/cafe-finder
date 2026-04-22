@@ -332,8 +332,10 @@ export default function MainApp() {
 
   useEffect(()=>{ const t=setTimeout(()=>setMounted(true),60); return()=>clearTimeout(t); },[]);
 
-  const handleSignOut=()=>{ localStorage.removeItem("expresso_auth"); router.push("/splash"); };
-
+const handleSignOut = async () => {
+  await fetch("/api/auth/signout", { method: "POST" });
+  router.push("/splash");
+};
   const fetchMapboxPlaces=useCallback(async(lat:number,lon:number):Promise<RawPlace[]>=>{
     if(!MAPBOX_TOKEN) return [];
     const radiusKm=radius/1000;
@@ -437,11 +439,24 @@ export default function MainApp() {
     return activeTab==="shortlist"?shortlist:(groupMode?(shouldUseSplit?splitResults:groupResults):filteredPlaces);
   },[activeTab,shortlist,groupMode,shouldUseSplit,splitResults,groupResults,filteredPlaces]);
 
-  useEffect(()=>{
-    const auth=localStorage.getItem("expresso_auth");
-    if(auth!=="true"){router.push("/splash");}else{setIsAuthenticated(true);}
-    setAuthChecked(true);
-  },[router]);
+useEffect(()=>{
+  const checkAuth = async () => {
+    try {
+      const res = await fetch("/api/auth/session");
+      const session = await res.json();
+      if (session?.user) {
+        setIsAuthenticated(true);
+      } else {
+        router.push("/splash");
+      }
+    } catch {
+      router.push("/splash");
+    } finally {
+      setAuthChecked(true);
+    }
+  };
+  checkAuth();
+},[router]);
 
   useEffect(()=>{
     if(!userLocation) return;

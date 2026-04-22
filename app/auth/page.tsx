@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { signIn } from "next-auth/react";
 
 type Mode = "login" | "signup";
 
@@ -13,35 +14,128 @@ export default function AuthPage() {
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  function handleSubmit(e: React.FormEvent) {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     setLoading(true);
-    setTimeout(() => {
+
+    try {
+      if (mode === "signup") {
+        // Validate password length
+        if (password.length < 8) {
+          setError("Password must be at least 8 characters");
+          setLoading(false);
+          return;
+        }
+
+        // Signup API call
+        const res = await fetch("/api/signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, email, password }),
+        });
+
+        // Parse response once
+        let signupData;
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          signupData = await res.json();
+        } else {
+          const text = await res.text();
+          signupData = { error: text || "Signup failed" };
+        }
+
+        if (!res.ok) {
+          setError(signupData?.error || "Signup failed. Please try again.");
+          setLoading(false);
+          return;
+        }
+
+        // Auto-login after successful signup
+        const signInRes = await signIn("credentials", {
+          email,
+          password,
+          redirect: false,
+        });
+
+        if (signInRes?.error) {
+          setError("Account created but login failed. Please try signing in.");
+          setLoading(false);
+          setMode("login");
+          return;
+        }
+
+        // Store auth flag and redirect
+        router.push("/main");
+      } else {
+        // Login flow
+        const res = await signIn("credentials", {
+          email,
+          password,
+          redirect: false,
+        });
+
+        if (res?.error) {
+          setError("Invalid email or password");
+          setLoading(false);
+          return;
+        }
+
+        router.push("/main");
+      }
+    } catch (err) {
+      console.error("Auth error:", err);
+      setError("Something went wrong. Please try again.");
       setLoading(false);
-      localStorage.setItem("expresso_auth", "true");
-      router.push("/main");
-    }, 1200);
-  }
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await signIn("google", { callbackUrl: "/main" });
+    } catch (err) {
+      console.error("Google sign in error:", err);
+      setError("Google sign in failed. Please try again.");
+      setLoading(false);
+    }
+  };
+
+  const switchMode = (newMode: Mode) => {
+    setMode(newMode);
+    setError(null);
+    setFocusedField(null);
+  };
 
   return (
     <>
       <style jsx global>{`
         @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300&family=DM+Sans:wght@300;400;500&display=swap');
 
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        *, *::before, *::after {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+        }
+
+        body {
+          background: #FFECD1;
+        }
 
         .auth-page {
           min-height: 100vh;
           display: grid;
           grid-template-columns: 1fr 1fr;
           font-family: 'DM Sans', sans-serif;
-          background: #FFECD1; /* Sand */
+          background: #FFECD1;
         }
 
-        /* ── Left panel — Chocolate ─────────────────────────── */
+        /* Left Panel — Chocolate */
         .left-panel {
-          background: #3E000C; /* Chocolate */
+          background: #3E000C;
           position: relative;
           display: flex;
           flex-direction: column;
@@ -50,32 +144,36 @@ export default function AuthPage() {
           overflow: hidden;
           animation: panelIn 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
+
         @keyframes panelIn {
           from { opacity: 0; transform: translateX(-24px); }
           to { opacity: 1; transform: translateX(0); }
         }
 
-        /* Coffee stain / grain texture */
         .left-panel::before {
           content: '';
           position: absolute;
-          width: 480px; height: 480px;
+          width: 480px;
+          height: 480px;
           border-radius: 50%;
           background: radial-gradient(circle, rgba(255,236,209,0.03) 0%, transparent 70%);
-          top: -160px; right: -160px;
-          pointer-events: none;
-        }
-        .left-panel::after {
-          content: '';
-          position: absolute;
-          width: 300px; height: 300px;
-          border-radius: 50%;
-          background: radial-gradient(circle, rgba(255,236,209,0.02) 0%, transparent 70%);
-          bottom: -80px; left: -80px;
+          top: -160px;
+          right: -160px;
           pointer-events: none;
         }
 
-        /* Coffee bean texture overlay */
+        .left-panel::after {
+          content: '';
+          position: absolute;
+          width: 300px;
+          height: 300px;
+          border-radius: 50%;
+          background: radial-gradient(circle, rgba(255,236,209,0.02) 0%, transparent 70%);
+          bottom: -80px;
+          left: -80px;
+          pointer-events: none;
+        }
+
         .coffee-texture {
           position: absolute;
           inset: 0;
@@ -87,16 +185,19 @@ export default function AuthPage() {
         }
 
         .brand {
-          position: relative; z-index: 2;
+          position: relative;
+          z-index: 2;
         }
+
         .brand-name {
           font-family: 'Cormorant Garamond', serif;
           font-weight: 300;
           font-size: 42px;
           letter-spacing: 0.14em;
-          color: #FFECD1; /* Sand */
+          color: #FFECD1;
           line-height: 1;
         }
+
         .brand-tagline {
           font-size: 11px;
           font-weight: 300;
@@ -107,8 +208,10 @@ export default function AuthPage() {
         }
 
         .hero-text {
-          position: relative; z-index: 2;
+          position: relative;
+          z-index: 2;
         }
+
         .hero-text h2 {
           font-family: 'Cormorant Garamond', serif;
           font-weight: 300;
@@ -118,6 +221,7 @@ export default function AuthPage() {
           line-height: 1.2;
           margin-bottom: 20px;
         }
+
         .hero-text p {
           font-size: 13px;
           font-weight: 300;
@@ -127,12 +231,14 @@ export default function AuthPage() {
         }
 
         .features {
-          position: relative; z-index: 2;
+          position: relative;
+          z-index: 2;
           list-style: none;
           display: flex;
           flex-direction: column;
           gap: 16px;
         }
+
         .features li {
           display: flex;
           align-items: center;
@@ -142,30 +248,37 @@ export default function AuthPage() {
           color: rgba(255,236,209,0.55);
           letter-spacing: 0.02em;
         }
+
         .feature-dot {
-          width: 5px; height: 5px;
+          width: 5px;
+          height: 5px;
           border-radius: 50%;
-          background: #C08552; /* Caramel accent */
+          background: #C08552;
           flex-shrink: 0;
         }
 
         .bracket {
           position: absolute;
-          width: 36px; height: 36px;
+          width: 36px;
+          height: 36px;
           opacity: 0.15;
         }
+
         .bracket-tr {
-          top: 32px; right: 32px;
+          top: 32px;
+          right: 32px;
           border-top: 1px solid #FFECD1;
           border-right: 1px solid #FFECD1;
         }
+
         .bracket-bl {
-          bottom: 32px; left: 32px;
+          bottom: 32px;
+          left: 32px;
           border-bottom: 1px solid #FFECD1;
           border-left: 1px solid #FFECD1;
         }
 
-        /* ── Right panel — Sand/Cream ─────────────────────────────── */
+        /* Right Panel — Sand/Cream */
         .right-panel {
           display: flex;
           flex-direction: column;
@@ -175,6 +288,7 @@ export default function AuthPage() {
           background: #FFECD1;
           animation: formIn 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
         }
+
         @keyframes formIn {
           from { opacity: 0; transform: translateY(20px); }
           to { opacity: 1; transform: translateY(0); }
@@ -185,13 +299,13 @@ export default function AuthPage() {
           max-width: 380px;
         }
 
-        /* Mode tabs - Caramel accent */
         .mode-tabs {
           display: flex;
           gap: 0;
           margin-bottom: 40px;
           border-bottom: 1px solid rgba(62,0,12,0.12);
         }
+
         .tab-btn {
           flex: 1;
           padding: 12px 0;
@@ -207,17 +321,22 @@ export default function AuthPage() {
           position: relative;
           transition: color 0.3s ease;
         }
+
         .tab-btn.active {
           color: #3E000C;
         }
+
         .tab-btn.active::after {
           content: '';
           position: absolute;
-          bottom: -1px; left: 0; right: 0;
+          bottom: -1px;
+          left: 0;
+          right: 0;
           height: 1.5px;
-          background: #C08552; /* Caramel */
+          background: #C08552;
           animation: tabLine 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
+
         @keyframes tabLine {
           from { transform: scaleX(0); }
           to { transform: scaleX(1); }
@@ -226,6 +345,7 @@ export default function AuthPage() {
         .form-heading {
           margin-bottom: 32px;
         }
+
         .form-heading h1 {
           font-family: 'Cormorant Garamond', serif;
           font-weight: 300;
@@ -234,11 +354,48 @@ export default function AuthPage() {
           line-height: 1.1;
           margin-bottom: 8px;
         }
+
         .form-heading p {
           font-size: 12px;
           font-weight: 300;
-          color: #895737; /* Coffee brown */
+          color: #895737;
           letter-spacing: 0.01em;
+        }
+
+        .error-message {
+          background: rgba(158, 58, 58, 0.08);
+          border: 1px solid rgba(158, 58, 58, 0.2);
+          border-radius: 8px;
+          padding: 12px 14px;
+          margin-bottom: 20px;
+          font-size: 12px;
+          font-weight: 300;
+          color: #9e3a3a;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          animation: slideIn 0.25s ease-out;
+        }
+
+        @keyframes slideIn {
+          from { opacity: 0; transform: translateY(-4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+
+        .error-message button {
+          margin-left: auto;
+          background: none;
+          border: none;
+          font-size: 14px;
+          color: rgba(158, 58, 58, 0.5);
+          cursor: pointer;
+          transition: color 0.15s;
+          padding: 0;
+          line-height: 1;
+        }
+
+        .error-message button:hover {
+          color: #9e3a3a;
         }
 
         .form {
@@ -253,6 +410,7 @@ export default function AuthPage() {
           gap: 7px;
           animation: fieldIn 0.5s ease both;
         }
+
         .field:nth-child(1) { animation-delay: 0.05s; }
         .field:nth-child(2) { animation-delay: 0.1s; }
         .field:nth-child(3) { animation-delay: 0.15s; }
@@ -270,6 +428,7 @@ export default function AuthPage() {
           color: #895737;
           transition: color 0.25s;
         }
+
         label.focused {
           color: #3E000C;
         }
@@ -277,7 +436,7 @@ export default function AuthPage() {
         input {
           width: 100%;
           padding: 13px 16px;
-          background: #F3E9DC; /* Cream */
+          background: #F3E9DC;
           border: 1px solid rgba(62,0,12,0.15);
           border-radius: 8px;
           font-family: 'DM Sans', sans-serif;
@@ -287,19 +446,27 @@ export default function AuthPage() {
           outline: none;
           transition: all 0.25s ease;
         }
-        input::placeholder { color: rgba(62,0,12,0.25); }
+
+        input::placeholder {
+          color: rgba(62,0,12,0.25);
+        }
+
         input:focus {
           border-color: #C08552;
           background: #FFECD1;
           box-shadow: 0 0 0 2px rgba(192,133,82,0.1);
         }
 
-        /* Submit button - Coffee theme */
+        input:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
         .submit-btn {
           margin-top: 8px;
           width: 100%;
           padding: 15px;
-          background: #5E3023; /* Brownie */
+          background: #5E3023;
           border: none;
           border-radius: 8px;
           color: #FFECD1;
@@ -313,14 +480,20 @@ export default function AuthPage() {
           overflow: hidden;
           transition: all 0.25s ease;
         }
-        .submit-btn:hover {
+
+        .submit-btn:hover:not(:disabled) {
           background: #3E000C;
           transform: translateY(-1px);
         }
-        .submit-btn:active {
+
+        .submit-btn:active:not(:disabled) {
           transform: translateY(0);
         }
-        .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .submit-btn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
 
         .submit-btn.loading::after {
           content: '';
@@ -330,6 +503,7 @@ export default function AuthPage() {
           transform: translateX(-100%);
           animation: shimmer 1.2s ease infinite;
         }
+
         @keyframes shimmer {
           to { transform: translateX(100%); }
         }
@@ -340,6 +514,7 @@ export default function AuthPage() {
           gap: 16px;
           margin: 24px 0;
         }
+
         .auth-divider::before,
         .auth-divider::after {
           content: '';
@@ -347,6 +522,7 @@ export default function AuthPage() {
           height: 1px;
           background: rgba(62,0,12,0.1);
         }
+
         .auth-divider span {
           font-size: 10px;
           font-weight: 300;
@@ -355,7 +531,6 @@ export default function AuthPage() {
           text-transform: uppercase;
         }
 
-        /* Social button */
         .social-btn {
           width: 100%;
           padding: 13px;
@@ -374,10 +549,16 @@ export default function AuthPage() {
           cursor: pointer;
           transition: all 0.25s ease;
         }
-        .social-btn:hover {
+
+        .social-btn:hover:not(:disabled) {
           border-color: #C08552;
           background: #FFECD1;
           transform: translateY(-1px);
+        }
+
+        .social-btn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
         }
 
         .switch-mode {
@@ -387,6 +568,7 @@ export default function AuthPage() {
           font-weight: 300;
           color: #895737;
         }
+
         .switch-mode button {
           background: none;
           border: none;
@@ -399,9 +581,15 @@ export default function AuthPage() {
           padding: 0;
           transition: color 0.25s;
         }
-        .switch-mode button:hover {
+
+        .switch-mode button:hover:not(:disabled) {
           color: #3E000C;
           text-decoration: underline;
+        }
+
+        .switch-mode button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
         }
 
         .bottom-note {
@@ -414,16 +602,22 @@ export default function AuthPage() {
           text-transform: uppercase;
         }
 
-        /* Responsive */
         @media (max-width: 768px) {
-          .auth-page { grid-template-columns: 1fr; }
-          .left-panel { display: none; }
-          .right-panel { padding: 48px 28px; justify-content: flex-start; padding-top: 64px; }
+          .auth-page {
+            grid-template-columns: 1fr;
+          }
+          .left-panel {
+            display: none;
+          }
+          .right-panel {
+            padding: 48px 28px;
+            justify-content: flex-start;
+            padding-top: 64px;
+          }
         }
       `}</style>
 
       <div className="auth-page">
-        {/* Left Panel - Chocolate */}
         <div className="left-panel">
           <div className="coffee-texture" />
           <div className="bracket bracket-tr" />
@@ -435,119 +629,228 @@ export default function AuthPage() {
           </div>
 
           <div className="hero-text">
-            <h2>Find where<br />everyone agrees.</h2>
-            <p>Group dining, solo cravings, or somewhere new — Expresso finds the right spot for the moment.</p>
+            <h2>
+              Find where
+              <br />
+              everyone agrees.
+            </h2>
+            <p>
+              Group dining, solo cravings, or somewhere new — Expresso finds the
+              right spot for the moment.
+            </p>
           </div>
 
           <ul className="features">
-            <li><span className="feature-dot" />Smart group recommendations</li>
-            <li><span className="feature-dot" />Split plans when tastes differ</li>
-            <li><span className="feature-dot" />Real prices, real distance</li>
-            <li><span className="feature-dot" />Works anywhere in India</li>
+            <li>
+              <span className="feature-dot" />
+              Smart group recommendations
+            </li>
+            <li>
+              <span className="feature-dot" />
+              Split plans when tastes differ
+            </li>
+            <li>
+              <span className="feature-dot" />
+              Real prices, real distance
+            </li>
+            <li>
+              <span className="feature-dot" />
+              Works anywhere in India
+            </li>
           </ul>
         </div>
 
-        {/* Right Panel - Sand/Cream */}
         <div className="right-panel">
           <div className="form-container">
-            {/* Mode Tabs */}
             <div className="mode-tabs">
               <button
+                type="button"
                 className={`tab-btn ${mode === "login" ? "active" : ""}`}
-                onClick={() => setMode("login")}
+                onClick={() => switchMode("login")}
+                disabled={loading}
               >
                 Sign in
               </button>
               <button
+                type="button"
                 className={`tab-btn ${mode === "signup" ? "active" : ""}`}
-                onClick={() => setMode("signup")}
+                onClick={() => switchMode("signup")}
+                disabled={loading}
               >
                 Create account
               </button>
             </div>
 
-            {/* Heading */}
             <div className="form-heading">
-              <h1>{mode === "login" ? "Welcome back." : "Join Expresso."}</h1>
-              <p>{mode === "login" ? "Sign in to access your saved places and groups." : "Create your account and start discovering together."}</p>
+              <h1>
+                {mode === "login" ? "Welcome back." : "Join Expresso."}
+              </h1>
+              <p>
+                {mode === "login"
+                  ? "Sign in to access your saved places and groups."
+                  : "Create your account and start discovering together."}
+              </p>
             </div>
 
-            {/* Form */}
+            {error && (
+              <div className="error-message">
+                <span>⚠</span>
+                <span>{error}</span>
+                <button type="button" onClick={() => setError(null)}>
+                  ✕
+                </button>
+              </div>
+            )}
+
             <form className="form" onSubmit={handleSubmit}>
               {mode === "signup" && (
                 <div className="field">
-                  <label className={focusedField === "name" ? "focused" : ""}>Full name</label>
+                  <label className={focusedField === "name" ? "focused" : ""}>
+                    Full name
+                  </label>
                   <input
                     type="text"
-                    placeholder="Rito Das"
+                    placeholder="Prongz"
                     value={name}
-                    onChange={e => setName(e.target.value)}
+                    onChange={(e) => setName(e.target.value)}
                     onFocus={() => setFocusedField("name")}
                     onBlur={() => setFocusedField(null)}
                     required
+                    disabled={loading}
                     autoComplete="name"
                   />
                 </div>
               )}
 
               <div className="field">
-                <label className={focusedField === "email" ? "focused" : ""}>Email address</label>
+                <label className={focusedField === "email" ? "focused" : ""}>
+                  Email address
+                </label>
                 <input
                   type="email"
                   placeholder="you@example.com"
                   value={email}
-                  onChange={e => setEmail(e.target.value)}
+                  onChange={(e) => setEmail(e.target.value)}
                   onFocus={() => setFocusedField("email")}
                   onBlur={() => setFocusedField(null)}
                   required
+                  disabled={loading}
                   autoComplete="email"
                 />
               </div>
 
               <div className="field">
-                <label className={focusedField === "password" ? "focused" : ""}>Password</label>
+                <label className={focusedField === "password" ? "focused" : ""}>
+                  Password
+                </label>
                 <input
                   type="password"
-                  placeholder={mode === "signup" ? "Min. 8 characters" : "Your password"}
+                  placeholder={
+                    mode === "signup" ? "Min. 8 characters" : "Your password"
+                  }
                   value={password}
-                  onChange={e => setPassword(e.target.value)}
+                  onChange={(e) => setPassword(e.target.value)}
                   onFocus={() => setFocusedField("password")}
                   onBlur={() => setFocusedField(null)}
                   required
-                  autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                  disabled={loading}
+                  autoComplete={
+                    mode === "signup" ? "new-password" : "current-password"
+                  }
                   minLength={mode === "signup" ? 8 : undefined}
                 />
               </div>
 
               {mode === "login" && (
                 <div style={{ textAlign: "right", marginTop: "-8px" }}>
-                  <button type="button" style={{ background: "none", border: "none", cursor: "pointer", fontSize: "11px", fontWeight: "300", color: "#895737", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em" }}>
+                  <button
+                    type="button"
+                    disabled={loading}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: loading ? "not-allowed" : "pointer",
+                      fontSize: "11px",
+                      fontWeight: "300",
+                      color: "#895737",
+                      fontFamily: "'DM Sans', sans-serif",
+                      letterSpacing: "0.04em",
+                      opacity: loading ? 0.5 : 1,
+                    }}
+                  >
                     Forgot password?
                   </button>
                 </div>
               )}
 
-              <button type="submit" className={`submit-btn ${loading ? "loading" : ""}`} disabled={loading}>
-                {loading ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"}
+              <button
+                type="submit"
+                className={`submit-btn ${loading ? "loading" : ""}`}
+                disabled={loading}
+              >
+                {loading
+                  ? "Please wait…"
+                  : mode === "login"
+                  ? "Sign in"
+                  : "Create account"}
               </button>
             </form>
 
-            <div className="auth-divider"><span>or</span></div>
+            <div className="auth-divider">
+              <span>or</span>
+            </div>
 
-            <button type="button" className="social-btn">
+            <button
+              type="button"
+              className="social-btn"
+              onClick={handleGoogleSignIn}
+              disabled={loading}
+            >
               <svg width="16" height="16" viewBox="0 0 24 24">
-                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
-                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                <path
+                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                  fill="#4285F4"
+                />
+                <path
+                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                  fill="#34A853"
+                />
+                <path
+                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                  fill="#FBBC05"
+                />
+                <path
+                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                  fill="#EA4335"
+                />
               </svg>
               Continue with Google
             </button>
 
             <p className="switch-mode">
-              {mode === "login"
-                ? <>New to Expresso?{" "}<button onClick={() => setMode("signup")}>Create account</button></>
-                : <>Already have an account?{" "}<button onClick={() => setMode("login")}>Sign in</button></>}
+              {mode === "login" ? (
+                <>
+                  New to Expresso?{" "}
+                  <button
+                    type="button"
+                    onClick={() => switchMode("signup")}
+                    disabled={loading}
+                  >
+                    Create account
+                  </button>
+                </>
+              ) : (
+                <>
+                  Already have an account?{" "}
+                  <button
+                    type="button"
+                    onClick={() => switchMode("login")}
+                    disabled={loading}
+                  >
+                    Sign in
+                  </button>
+                </>
+              )}
             </p>
           </div>
           <span className="bottom-note">Expresso © 2025</span>
