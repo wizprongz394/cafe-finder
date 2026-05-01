@@ -1,36 +1,195 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ☕ Expresso — Intelligent Café Decision System
 
-## Getting Started
+Expresso is a full-stack web application designed to simplify group-based café selection.
+Rather than merely listing locations, the system focuses on **decision support**, enabling users to collaboratively determine optimal choices based on shared preferences.
+<img width="1920" height="1080" alt="Screenshot (2482)" src="https://github.com/user-attachments/assets/3fbecce9-cc17-4275-87b8-ceb96477e08f" />
+<img width="1920" height="1080" alt="Screenshot (2483)" src="https://github.com/user-attachments/assets/95582c14-fdf7-4359-9680-c518fac552ff" />
+<img width="1920" height="1080" alt="Screenshot (2508)" src="https://github.com/user-attachments/assets/68f44d9e-8a83-4922-ba7f-89e16915e671" />
+<img width="1920" height="914" alt="Screenshot (2510)" src="https://github.com/user-attachments/assets/a012477b-7ce2-4f2c-a083-9adcb1cee544" />
 
-First, run the development server:
+---
+
+## 🚀 Overview
+
+Expresso was developed as a complete end-to-end system integrating:
+
+* **Frontend Interface** for user interaction
+* **Backend API Layer** for request handling
+* **Database Integration** for persistent storage
+* **Authentication System** for identity management
+
+The application demonstrates how multiple layers of a modern web system interact to form a cohesive product.
+
+---
+
+## 🧱 Tech Stack
+
+### Frontend
+
+* Next.js (App Router)
+* React
+* TypeScript
+
+### Backend
+
+* Next.js API Routes
+* Server-side logic using modern JavaScript/TypeScript
+
+### Database
+
+* MongoDB Atlas
+* Mongoose ODM
+
+### Authentication
+
+* NextAuth (Credentials Provider)
+* bcrypt for password hashing
+
+### Deployment
+
+* Vercel
+
+---
+
+## 🔐 Core Features
+
+### 1. User Authentication
+
+* Secure signup and login system
+* Password hashing using bcrypt
+* Session-based authentication via NextAuth
+
+### 2. Persistent Sessions
+
+* User identity maintained across requests
+* Protected routes based on authentication state
+
+### 3. Database Integration
+
+* User data stored in MongoDB
+* Structured schema using Mongoose
+
+### 4. API Architecture
+
+* RESTful API routes
+* JSON-based request/response handling
+* Error-safe backend design
+
+### 5. Scalable Foundation
+
+* Designed to support future features such as:
+
+  * group decision-making
+  * café recommendations
+  * user preferences and favorites
+
+---
+
+## ⚙️ Getting Started
+
+### 1. Clone the repository
+
+```bash
+git clone <your-repo-url>
+cd expresso
+```
+
+---
+
+### 2. Install dependencies
+
+```bash
+npm install
+```
+
+---
+
+### 3. Configure environment variables
+
+Create a `.env.local` file:
+
+```env
+MONGODB_URI=your_mongodb_connection_string
+NEXTAUTH_SECRET=your_generated_secret
+NEXTAUTH_URL=http://localhost:3000
+```
+
+---
+
+### 4. Run the development server
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```
+http://localhost:3000
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
+## 🧠 Key Learnings
 
-To learn more about Next.js, take a look at the following resources:
+This project was not limited to feature implementation. It involved:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+* Debugging multi-layer system interactions
+* Managing environment-specific configurations
+* Handling authentication and session logic
+* Understanding client-server communication deeply
+* Resolving real-world deployment issues
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The development process emphasized **system thinking**, not just coding.
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 🌍 Deployment
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The application is deployed using Vercel.
+
+Production considerations included:
+
+* environment variable configuration
+* secure authentication setup
+* database access control
+
+---
+
+## 📌 Future Enhancements
+
+* Group-based café decision engine
+* Real-time collaboration features
+* Recommendation algorithms
+* Enhanced UI/UX interactions
+
+---
+
+## 📄 Documentation
+
+A detailed technical breakdown of the entire development process is included in the project documentation, covering:
+
+* system architecture
+* debugging strategies
+* authentication flow
+* deployment challenges
+
+---
+
+## 🤝 Contribution
+
+This project is currently under active development. Contributions, suggestions, and feedback are welcome.
+
+---
+
+## 📜 License
+
+This project is open-source and available under the MIT License.
+
+---
+
+## ✨ Closing Note
+
+Expresso represents the transition from building isolated features to designing and understanding complete systems.
+
+It is not only a product, but a study of how modern web applications behave under real-world conditions.
